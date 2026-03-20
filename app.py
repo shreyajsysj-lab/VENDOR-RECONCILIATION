@@ -496,17 +496,18 @@ def run_reconciliation(vl_orig, cl_orig, tolerance=1.0):
     """
     results = {
         'invoice_matched': [],
-        'invoice_unmatched_vl': [],
+        'invoice_unmatched_vl': [],      # Tax Invoice / Sales Invoice only
         'invoice_unmatched_cl': [],
+        'cn_unmatched_vl': [],           # Credit Notes unmatched (Saleable Return, Non-Saleable, Credit Note etc.)
         'dn_matched': [],
         'dn_unmatched_vl': [],
         'dn_unmatched_cl': [],
         'collection_matched': [],
         'collection_unmatched_vl': [],
         'collection_unmatched_cl': [],
-        'reversal_vl_internal': [],       # Case B: Reversed in VL only
-        'reversal_cross_ledger': [],      # Case A: Reversed in VL but present in CL
-        'reversal_unmatched': [],         # Case C: No original found / amount mismatch
+        'reversal_vl_internal': [],
+        'reversal_cross_ledger': [],
+        'reversal_unmatched': [],
     }
 
     vl = vl_orig.copy()
@@ -933,6 +934,7 @@ def run_reconciliation(vl_orig, cl_orig, tolerance=1.0):
 
     # ════════════════════════════════════════════════════
     # STEP 5: Mark all remaining rows as Unmatched
+    # Credit Notes go to cn_unmatched_vl (separate from invoices)
     # ════════════════════════════════════════════════════
     for idx, r in vl[~vl['_matched']].iterrows():
         doc_t = str(r.get('doc_type', ''))
@@ -957,7 +959,11 @@ def run_reconciliation(vl_orig, cl_orig, tolerance=1.0):
             results['dn_unmatched_vl'].append(entry)
         elif is_collection(r.get('doc_type', '')):
             results['collection_unmatched_vl'].append(entry)
+        elif is_credit_note(r.get('doc_type', '')):
+            # Credit Notes (Saleable Return, Non-Saleable, Credit Note, etc.) — separate bucket
+            results['cn_unmatched_vl'].append(entry)
         else:
+            # Only pure invoices / tax invoices / sales invoices
             results['invoice_unmatched_vl'].append(entry)
 
     for idx, r in cl[~cl['_matched']].iterrows():
@@ -1188,31 +1194,45 @@ def build_excel(results, vl_orig, cl_orig, VL='Vendor', CL='Customer'):
     vl_ann = vl_orig
     ws_vl = wb.create_sheet(f'{VL[:18]} Vendor Ledger'[:31])
     ws_vl.sheet_view.showGridLines = False
-    ws_vl.freeze_panes = 'A3'
+    ws_vl.freeze_panes = 'A4'
 
     vl_display_cols = ['doc_date', 'doc_no', 'doc_type', 'particulars', 'debit', 'credit', 'closing']
     vl_display_cols = [c for c in vl_display_cols if c in vl_ann.columns]
     vl_display_cols += ['_remark', '_match_ref']
     ncols_vl = len(vl_display_cols)
 
+    # Row 1: Title
     ws_vl.merge_cells(f'A1:{get_column_letter(ncols_vl)}1')
     title_vl = ws_vl['A1']
     title_vl.value = f'📘 {VL} — VENDOR LEDGER WITH REMARKS'
     title_vl.font = Font(bold=True, size=12, color='FFFFFF', name='Calibri')
-    title_vl.fill = PatternFill(fill_type='solid', fgColor='1A3A6B')
+    title_vl.fill = mk_fill('1A3A6B')
     title_vl.alignment = Alignment(horizontal='center', vertical='center')
     ws_vl.row_dimensions[1].height = 28
 
+    # Row 2: SUBTOTAL at top (formulas filled after data)
+    for c_idx in range(1, ncols_vl + 1):
+        cell = ws_vl.cell(row=2, column=c_idx)
+        cell.fill = mk_fill('2A3A5A')
+        cell.border = border
+        cell.font = Font(bold=True, color='FFFFFF', name='Calibri', size=10)
+        cell.alignment = Alignment(horizontal='center', vertical='center')
+    ws_vl.cell(row=2, column=1).value = 'SUBTOTAL ▲'
+    ws_vl.row_dimensions[2].height = 22
+
+    # Row 3: Headers
     vl_hmap = {'doc_date':'Doc Date','doc_no':'Doc No','doc_type':'Doc Type',
                'particulars':'Particulars','debit':'Debit','credit':'Credit',
                'closing':'Closing Balance','_remark':'Remark','_match_ref':'Matched With'}
     headers = [vl_hmap.get(c, c) for c in vl_display_cols]
-    style_header(ws_vl, headers, row=2, color='1A3A6B')
+    style_header(ws_vl, headers, row=3, color='1A3A6B')
 
     debit_col_vl  = (vl_display_cols.index('debit')  + 1) if 'debit'  in vl_display_cols else None
     credit_col_vl = (vl_display_cols.index('credit') + 1) if 'credit' in vl_display_cols else None
 
-    for r_idx, (_, row) in enumerate(vl_ann[vl_display_cols].iterrows(), 3):
+    # Data starts at row 4
+    VL_DATA_START = 4
+    for r_idx, (_, row) in enumerate(vl_ann[vl_display_cols].iterrows(), VL_DATA_START):
         remark = str(row.get('_remark', ''))
         if 'Unmatched' in remark or 'Mismatch' in remark or 'Not Found' in remark:
             fill = COLORS['unmatched_fill']
@@ -1223,25 +1243,25 @@ def build_excel(results, vl_orig, cl_orig, VL='Vendor', CL='Customer'):
         for c_idx, col in enumerate(vl_display_cols, 1):
             val = row[col]
             cell = write_cell(ws_vl, r_idx, c_idx, val)
-            cell.fill = PatternFill(fill_type='solid', fgColor=fill)
+            cell.fill = mk_fill(fill)
             cell.border = border
             cell.alignment = Alignment(vertical='center')
             cell.font = Font(name='Calibri', size=9)
         ws_vl.row_dimensions[r_idx].height = 18
 
-    sub_r_vl = len(vl_ann) + 3
-    for c_idx in range(1, ncols_vl + 1):
-        cell = ws_vl.cell(row=sub_r_vl, column=c_idx)
-        cell.fill = PatternFill(fill_type='solid', fgColor='1A3A6B')
-        cell.border = border
-        cell.font = Font(bold=True, color='FFFFFF', name='Calibri', size=10)
-    ws_vl.cell(row=sub_r_vl, column=1).value = 'SUBTOTAL'
+    vl_data_end = VL_DATA_START + len(vl_ann) - 1
+
+    # Fill SUBTOTAL formulas at row 2
     for col_i in [debit_col_vl, credit_col_vl]:
         if col_i:
-            cl = get_column_letter(col_i)
-            ws_vl.cell(row=sub_r_vl, column=col_i).value = f'=SUBTOTAL(9,{cl}3:{cl}{sub_r_vl-1})'
-            ws_vl.cell(row=sub_r_vl, column=col_i).number_format = '#,##0.00'
-    ws_vl.row_dimensions[sub_r_vl].height = 22
+            cl_l = get_column_letter(col_i)
+            cell = ws_vl.cell(row=2, column=col_i,
+                              value=f'=SUBTOTAL(9,{cl_l}{VL_DATA_START}:{cl_l}{vl_data_end})')
+            cell.number_format = '#,##0.00'
+            cell.fill = mk_fill('2A3A5A')
+            cell.font = Font(bold=True, color='FFFFFF', name='Calibri', size=10)
+            cell.border = border
+            cell.alignment = Alignment(horizontal='right', vertical='center')
     auto_width(ws_vl)
 
     # ══════════════════════════════════════════
@@ -1250,55 +1270,69 @@ def build_excel(results, vl_orig, cl_orig, VL='Vendor', CL='Customer'):
     cl_ann = cl_orig
     ws_cl = wb.create_sheet(f'{CL[:18]} Customer Ledger'[:31])
     ws_cl.sheet_view.showGridLines = False
-    ws_cl.freeze_panes = 'A3'
+    ws_cl.freeze_panes = 'A4'
 
     cl_display_cols = ['doc_date', 'doc_no', 'doc_type', 'debit', 'credit']
     cl_display_cols = [c for c in cl_display_cols if c in cl_ann.columns]
     cl_display_cols += ['_remark', '_match_ref']
     ncols_cl = len(cl_display_cols)
 
+    # Row 1: Title
     ws_cl.merge_cells(f'A1:{get_column_letter(ncols_cl)}1')
     title_cl = ws_cl['A1']
     title_cl.value = f'📗 {CL} — CUSTOMER LEDGER WITH REMARKS'
     title_cl.font = Font(bold=True, size=12, color='FFFFFF', name='Calibri')
-    title_cl.fill = PatternFill(fill_type='solid', fgColor='1A6B45')
+    title_cl.fill = mk_fill('1A6B45')
     title_cl.alignment = Alignment(horizontal='center', vertical='center')
     ws_cl.row_dimensions[1].height = 28
 
+    # Row 2: SUBTOTAL at top (formulas filled after data)
+    for c_idx in range(1, ncols_cl + 1):
+        cell = ws_cl.cell(row=2, column=c_idx)
+        cell.fill = mk_fill('1A4A35')
+        cell.border = border
+        cell.font = Font(bold=True, color='FFFFFF', name='Calibri', size=10)
+        cell.alignment = Alignment(horizontal='center', vertical='center')
+    ws_cl.cell(row=2, column=1).value = 'SUBTOTAL ▲'
+    ws_cl.row_dimensions[2].height = 22
+
+    # Row 3: Headers
     cl_hmap = {'doc_date':'Doc Date','doc_no':'Doc No','doc_type':'Doc Type',
                'debit':'Debit (LC)','credit':'Credit (LC)',
                '_remark':'Remark','_match_ref':'Matched With'}
     headers = [cl_hmap.get(c, c) for c in cl_display_cols]
-    style_header(ws_cl, headers, row=2, color='1A6B45')
+    style_header(ws_cl, headers, row=3, color='1A6B45')
 
     debit_col_cl  = (cl_display_cols.index('debit')  + 1) if 'debit'  in cl_display_cols else None
     credit_col_cl = (cl_display_cols.index('credit') + 1) if 'credit' in cl_display_cols else None
 
-    for r_idx, (_, row) in enumerate(cl_ann[cl_display_cols].iterrows(), 3):
+    # Data starts at row 4
+    CL_DATA_START = 4
+    for r_idx, (_, row) in enumerate(cl_ann[cl_display_cols].iterrows(), CL_DATA_START):
         remark = str(row.get('_remark', ''))
         fill = COLORS['unmatched_fill'] if 'Unmatched' in remark else COLORS['matched_fill']
         for c_idx, col in enumerate(cl_display_cols, 1):
             val = row[col]
             cell = write_cell(ws_cl, r_idx, c_idx, val)
-            cell.fill = PatternFill(fill_type='solid', fgColor=fill)
+            cell.fill = mk_fill(fill)
             cell.border = border
             cell.alignment = Alignment(vertical='center')
             cell.font = Font(name='Calibri', size=9)
         ws_cl.row_dimensions[r_idx].height = 18
 
-    sub_r_cl = len(cl_ann) + 3
-    for c_idx in range(1, ncols_cl + 1):
-        cell = ws_cl.cell(row=sub_r_cl, column=c_idx)
-        cell.fill = PatternFill(fill_type='solid', fgColor='1A6B45')
-        cell.border = border
-        cell.font = Font(bold=True, color='FFFFFF', name='Calibri', size=10)
-    ws_cl.cell(row=sub_r_cl, column=1).value = 'SUBTOTAL'
+    cl_data_end = CL_DATA_START + len(cl_ann) - 1
+
+    # Fill SUBTOTAL formulas at row 2
     for col_i in [debit_col_cl, credit_col_cl]:
         if col_i:
             cl_l = get_column_letter(col_i)
-            ws_cl.cell(row=sub_r_cl, column=col_i).value = f'=SUBTOTAL(9,{cl_l}3:{cl_l}{sub_r_cl-1})'
-            ws_cl.cell(row=sub_r_cl, column=col_i).number_format = '#,##0.00'
-    ws_cl.row_dimensions[sub_r_cl].height = 22
+            cell = ws_cl.cell(row=2, column=col_i,
+                              value=f'=SUBTOTAL(9,{cl_l}{CL_DATA_START}:{cl_l}{cl_data_end})')
+            cell.number_format = '#,##0.00'
+            cell.fill = mk_fill('1A4A35')
+            cell.font = Font(bold=True, color='FFFFFF', name='Calibri', size=10)
+            cell.border = border
+            cell.alignment = Alignment(horizontal='right', vertical='center')
     auto_width(ws_cl)
 
     # ══════════════════════════════════════════
@@ -1401,6 +1435,7 @@ def build_excel(results, vl_orig, cl_orig, VL='Vendor', CL='Customer'):
     write_sheet(f'Inv-Matched',                   results['invoice_matched'],         '1A6B45')
     write_sheet(f'Inv-Unmatch-{vl6}',             results['invoice_unmatched_vl'],    'A32035', is_vl_sheet=True)
     write_sheet(f'Inv-Unmatch-{cl6}',             results['invoice_unmatched_cl'],    'A32035', is_vl_sheet=False)
+    write_sheet(f'CN-Unmatch-{vl6}',              results['cn_unmatched_vl'],         'B85C00', is_vl_sheet=True)
     write_sheet(f'DN-CN-Matched',                 results['dn_matched'],              '1A6B45')
     write_sheet(f'DN-Unmatch-{vl6}',              results['dn_unmatched_vl'],         'A32035', is_vl_sheet=True)
     write_sheet(f'DN-Unmatch-{cl6}',              results['dn_unmatched_cl'],         'A32035', is_vl_sheet=False)
@@ -1419,8 +1454,9 @@ def build_excel(results, vl_orig, cl_orig, VL='Vendor', CL='Customer'):
     # ══════════════════════════════════════════
     ws_rs = wb.create_sheet('Recon Statement', 1)
     ws_rs.sheet_view.showGridLines = False
-    ws_rs.column_dimensions['A'].width = 58
+    ws_rs.column_dimensions['A'].width = 62
     ws_rs.column_dimensions['B'].width = 22
+    ws_rs.column_dimensions['C'].width = 28
 
     def ssum(lst, key):
         try: return sum(float(d.get(key, 0) or 0) for d in lst)
@@ -1431,49 +1467,86 @@ def build_excel(results, vl_orig, cl_orig, VL='Vendor', CL='Customer'):
     dn_un_cl_v   = ssum(results['dn_unmatched_cl'],        'Debit') + ssum(results['dn_unmatched_cl'],        'Credit')
     col_un_vl_v  = ssum(results['collection_unmatched_vl'],'Debit') + ssum(results['collection_unmatched_vl'],'Credit')
     col_un_cl_v  = ssum(results['collection_unmatched_cl'],'Debit') + ssum(results['collection_unmatched_cl'],'Credit')
-    cn_v         = ssum([r for r in results['dn_matched'] if 'Credit Note' in str(r.get('Match Type',''))], 'VL Debit') +                    ssum([r for r in results['dn_matched'] if 'Credit Note' in str(r.get('Match Type',''))], 'VL Credit')
-    rev_cross_v  = ssum(results['reversal_cross_ledger'], 'VL Original Debit') + ssum(results['reversal_cross_ledger'], 'VL Original Credit')
-    vl_close  = results.get('vl_closing') or 0.0
-    # CL closing = Credit (Cr) - Debit (Dr)
-    cl_close  = results.get('cl_closing') or (
-        ssum(results['invoice_unmatched_cl'] + results['dn_unmatched_cl'] + results['collection_unmatched_cl'], 'Credit') -
-        ssum(results['invoice_unmatched_cl'] + results['dn_unmatched_cl'] + results['collection_unmatched_cl'], 'Debit')
-    )
+    # Credit notes unmatched in VL (Saleable Return, Non-Saleable, Credit Note)
+    cn_un_vl_v   = ssum(results.get('cn_unmatched_vl', []), 'Debit') + ssum(results.get('cn_unmatched_vl', []), 'Credit')
+    vl_close     = results.get('vl_closing') or 0.0
+    cl_close     = results.get('cl_closing') or 0.0
 
+    # Sheet name references (truncated to match actual sheet tab names)
+    vl6 = VL[:10]; cl6 = CL[:10]
+    src = {
+        'inv_vl':  f'Inv-Unmatch-{vl6}'[:31],
+        'inv_cl':  f'Inv-Unmatch-{cl6}'[:31],
+        'cn_vl':   f'CN-Unmatch-{vl6}'[:31],
+        'dn_cl':   f'DN-Unmatch-{cl6}'[:31],
+        'col_vl':  f'Coll-Unmatch-{vl6}'[:31],
+        'col_cl':  f'Coll-Unmatch-{cl6}'[:31],
+        'vl_ledger': f'{VL[:18]} Vendor Ledger'[:31],
+        'cl_ledger': f'{CL[:18]} Customer Ledger'[:31],
+    }
+
+    # Each row: (label, amount, row_type, source_sheet_name)
     rs_rows = [
-        ('Particular', 'Amount (₹)', 'H'),
-        (f'Balance as per {VL} Books (A)', vl_close, 'VL'),
-        (f'Less:  Tax Invoice delivered but not available in {CL}', -inv_un_vl_v, 'L'),
-        (f'Add:   Credit Note available in {VL} but not in {CL}', cn_v, 'A'),
-        (f'Less:  Debit Notes available in {CL} but not in {VL}', -dn_un_cl_v, 'L'),
-        (f'Add:   Tax Invoice delivered but not available in {VL}', inv_un_cl_v, 'A'),
-        (f'Add:   Payment not available in {CL}', col_un_vl_v, 'A'),
-        (f'Less:  Payment not available in {VL}', -col_un_cl_v, 'L'),
-        ('', '', 'B'),
-        (f'Net Balance as per {VL} Books — B', '=SUM(B2:B8)', 'T'),
-        ('', '', 'B'),
-        (f'Balance as per {CL} Books — C', cl_close, 'CL'),
-        ('', '', 'B'),
-        ('Unreconciled Difference (B - C)', '=B10-B12', 'D'),
-        ('(This value should be zero after all the adjustments)', '', 'N'),
+        ('Particular',                                              'Amount (₹)',    'H',  'Source Sheet'),
+        (f'Balance as per {VL} Books (A)',                          vl_close,        'VL', src['vl_ledger']),
+        (f'Less:  Tax Invoice in {VL} not available in {CL}',      -inv_un_vl_v,    'L',  src['inv_vl']),
+        (f'Add:   Credit Note in {VL} not available in {CL}',       cn_un_vl_v,     'A',  src['cn_vl']),
+        (f'Less:  Debit Notes in {CL} not available in {VL}',      -dn_un_cl_v,     'L',  src['dn_cl']),
+        (f'Add:   Tax Invoice in {CL} not available in {VL}',       inv_un_cl_v,    'A',  src['inv_cl']),
+        (f'Add:   Payment not available in {CL}',                   col_un_vl_v,    'A',  src['col_vl']),
+        (f'Less:  Payment not available in {VL}',                  -col_un_cl_v,    'L',  src['col_cl']),
+        ('',                                                         '',             'B',  ''),
+        (f'Net Balance as per {VL} Books — B',                     '=SUM(B2:B8)',   'T',  ''),
+        ('',                                                         '',             'B',  ''),
+        (f'Balance as per {CL} Books — C',                          cl_close,       'CL', src['cl_ledger']),
+        ('',                                                         '',             'B',  ''),
+        ('Unreconciled Difference (B - C)',                         '=B10-B12',     'D',  ''),
+        ('(This value should be zero after all the adjustments)',    '',             'N',  ''),
     ]
 
-    fill_map = {'H':('1C2130','E8ECF4'),'VL':('1A3A6B','FFFFFF'),'L':('FFE8E8','A32035'),
-                'A':('E8F5EE','1A6B45'),'B':('FFFFFF','FFFFFF'),'T':('1A3A6B','FFFFFF'),
-                'CL':('1A6B45','FFFFFF'),'D':('CC0000','FFFFFF'),'N':('CC0000','FFFFFF')}
+    fill_map = {
+        'H':  ('1C2130', 'E8ECF4'),
+        'VL': ('1A3A6B', 'FFFFFF'),
+        'L':  ('FFE8E8', 'A32035'),
+        'A':  ('E8F5EE', '1A6B45'),
+        'B':  ('FFFFFF', 'FFFFFF'),
+        'T':  ('1A3A6B', 'FFFFFF'),
+        'CL': ('1A6B45', 'FFFFFF'),
+        'D':  ('CC0000', 'FFFFFF'),
+        'N':  ('CC0000', 'FFFFFF'),
+    }
 
-    for r_ptr, (label, amount, rtype) in enumerate(rs_rows, 1):
-        bg, fg = fill_map.get(rtype, ('FFFFFF','000000'))
+    for r_ptr, (label, amount, rtype, src_sheet) in enumerate(rs_rows, 1):
+        bg, fg = fill_map.get(rtype, ('FFFFFF', '000000'))
+        is_bold = rtype in ('H', 'VL', 'T', 'CL', 'D')
+
+        # Column A: Particular
         cell_a = ws_rs.cell(row=r_ptr, column=1, value=label)
+        cell_a.fill = PatternFill(fill_type='solid', fgColor=bg)
+        cell_a.font = Font(name='Calibri', size=10, color=fg, bold=is_bold)
+        cell_a.border = border
+        cell_a.alignment = Alignment(vertical='center')
+
+        # Column B: Amount
         cell_b = ws_rs.cell(row=r_ptr, column=2, value=amount)
-        for cell in [cell_a, cell_b]:
-            cell.fill = PatternFill(fill_type='solid', fgColor=bg)
-            cell.font = Font(name='Calibri', size=10, color=fg,
-                             bold=(rtype in ('H','VL','T','CL','D')))
-            cell.border = border
+        cell_b.fill = PatternFill(fill_type='solid', fgColor=bg)
+        cell_b.font = Font(name='Calibri', size=10, color=fg, bold=is_bold)
+        cell_b.border = border
         cell_b.alignment = Alignment(horizontal='right', vertical='center')
         if isinstance(amount, (int, float)):
             cell_b.number_format = '#,##0.00'
+
+        # Column C: Source Sheet hyperlink
+        cell_c = ws_rs.cell(row=r_ptr, column=3, value=f'→ {src_sheet}' if src_sheet else '')
+        cell_c.fill = PatternFill(fill_type='solid', fgColor=bg)
+        cell_c.border = border
+        cell_c.alignment = Alignment(horizontal='center', vertical='center')
+        if src_sheet and rtype not in ('H', 'B', 'T', 'D', 'N'):
+            cell_c.font = Font(name='Calibri', size=9, color='1A6BCC',
+                               bold=True, underline='single')
+        else:
+            cell_c.font = Font(name='Calibri', size=9, color=fg)
+
         ws_rs.row_dimensions[r_ptr].height = 22 if rtype != 'B' else 8
 
     wb.save(output)
