@@ -519,16 +519,16 @@ def run_reconciliation(vl_orig, cl_orig, tolerance=1.0):
                 orig_match = m.iloc[0]
                 match_basis_rev = 'Period + Amount Match'
 
-        # ── Amount Validation: reversal amount must match original ──
+        # ── Amount Validation: reversal amount must be same/close to original ──
+        # STRICT CHECK: only compare total amounts — not cross debit/credit
+        # This prevents false matches where amounts are completely different
         amount_valid = False
         if orig_match is not None:
-            orig_amount = round_amount(orig_match.get('debit', 0) + orig_match.get('credit', 0))
-            orig_credit = round_amount(orig_match.get('credit', 0))
-            orig_debit  = round_amount(orig_match.get('debit', 0))
-            # Accept if total amount, or credit/debit individually are within tolerance
-            if (abs(rev_amount - orig_amount) <= tolerance or
-                abs(rev_credit - orig_debit) <= tolerance or
-                abs(rev_debit - orig_credit) <= tolerance):
+            orig_amount = round_amount(
+                orig_match.get('debit', 0) + orig_match.get('credit', 0)
+            )
+            # Only accept if total amounts are within tolerance
+            if orig_amount > 0 and abs(rev_amount - orig_amount) <= tolerance:
                 amount_valid = True
 
         if orig_match is not None and amount_valid:
@@ -556,11 +556,11 @@ def run_reconciliation(vl_orig, cl_orig, tolerance=1.0):
                 # ── CASE A: Invoice reversed in VL but ALSO present in CL ──
                 cl_row = cl_for_orig.iloc[0]
                 cl.at[cl_row['_idx'], '_matched'] = True
-                cl.at[cl_row['_idx'], '_remark'] = 'Invoice Reversed in VL | Present in CL - Needs Review'
+                cl.at[cl_row['_idx'], '_remark'] = 'Invoice Reversed in VL — Needs Review'
                 cl.at[cl_row['_idx'], '_match_ref'] = orig_doc_no
 
-                vl.at[idx, '_remark'] = f'Reversal Entry | Original: {orig_doc_no} | Invoice Also in CL'
-                vl.at[orig_vl_idx, '_remark'] = f'Invoice Reversed in VL | Reversal: {str(rev_row.get("doc_no",""))} | Also in CL'
+                vl.at[idx, '_remark'] = 'Reversal Entry — Invoice Also in CL'
+                vl.at[orig_vl_idx, '_remark'] = 'Invoice Reversed in VL — Also in CL'
 
                 results['reversal_cross_ledger'].append({
                     'VL Original Doc No': orig_doc_no,
@@ -585,8 +585,8 @@ def run_reconciliation(vl_orig, cl_orig, tolerance=1.0):
                 })
             else:
                 # ── CASE B: Pure VL internal reversal — not in CL ──
-                vl.at[idx, '_remark'] = f'Reversal Entry | Original: {orig_doc_no} | Not in CL'
-                vl.at[orig_vl_idx, '_remark'] = f'Invoice Reversed in VL | Reversal: {str(rev_row.get("doc_no",""))} | Not in CL'
+                vl.at[idx, '_remark'] = 'Reversal Entry — Not in CL'
+                vl.at[orig_vl_idx, '_remark'] = 'Invoice Reversed in VL — Not in CL'
 
                 results['reversal_vl_internal'].append({
                     'VL Original Doc No': orig_doc_no,
@@ -608,11 +608,11 @@ def run_reconciliation(vl_orig, cl_orig, tolerance=1.0):
             # ── CASE C: No original found OR amount mismatch ──
             reason = 'Original Invoice Not Found in VL'
             if orig_match is not None and not amount_valid:
-                orig_amt_str = round_amount(orig_match.get('debit', 0) + orig_match.get('credit', 0))
-                reason = f'Amount Mismatch (Reversal={rev_amount} | Found Orig={orig_amt_str})'
+                orig_amt_disp = round_amount(orig_match.get('debit', 0) + orig_match.get('credit', 0))
+                reason = f'Amount Mismatch (Reversal ₹{rev_amount:,.2f} vs Original ₹{orig_amt_disp:,.2f})'
 
             vl.at[idx, '_matched'] = True
-            vl.at[idx, '_remark'] = f'Reversal Entry - {reason}'
+            vl.at[idx, '_remark'] = f'Reversal Entry — {reason}'
 
             results['reversal_unmatched'].append({
                 'VL Doc No': str(rev_row.get('doc_no', '')),
@@ -646,10 +646,10 @@ def run_reconciliation(vl_orig, cl_orig, tolerance=1.0):
         if not matches.empty:
             crow = matches.iloc[0]
             vl.at[idx, '_matched'] = True
-            vl.at[idx, '_remark'] = f'Matched | CL Doc: {str(crow.get("doc_no",""))}'
+            vl.at[idx, '_remark'] = 'Matched — Invoice'
             vl.at[idx, '_match_ref'] = str(crow.get('doc_no', ''))
             cl.at[crow['_idx'], '_matched'] = True
-            cl.at[crow['_idx'], '_remark'] = f'Matched | VL Doc: {str(vrow.get("doc_no",""))}'
+            cl.at[crow['_idx'], '_remark'] = 'Matched — Invoice'
             cl.at[crow['_idx'], '_match_ref'] = str(vrow.get('doc_no', ''))
             cl_inv.at[crow.name, '_matched'] = True
             results['invoice_matched'].append({
@@ -696,10 +696,10 @@ def run_reconciliation(vl_orig, cl_orig, tolerance=1.0):
 
         if matched:
             vl.at[idx, '_matched'] = True
-            vl.at[idx, '_remark'] = f'Matched - Debit Note | CL Doc: {str(crow.get("doc_no",""))}'
+            vl.at[idx, '_remark'] = f'Matched — Debit Note ({basis})'
             vl.at[idx, '_match_ref'] = str(crow.get('doc_no', ''))
             cl.at[crow['_idx'], '_matched'] = True
-            cl.at[crow['_idx'], '_remark'] = f'Matched - Debit Note | VL Doc: {str(vrow.get("doc_no",""))}'
+            cl.at[crow['_idx'], '_remark'] = f'Matched — Debit Note ({basis})'
             cl.at[crow['_idx'], '_match_ref'] = str(vrow.get('doc_no', ''))
             cl_dn.at[crow.name, '_matched'] = True
             results['dn_matched'].append({
@@ -751,10 +751,10 @@ def run_reconciliation(vl_orig, cl_orig, tolerance=1.0):
 
         if matched:
             vl.at[idx, '_matched'] = True
-            vl.at[idx, '_remark'] = f'Matched - Collection ({basis}) | CL Doc: {str(crow.get("doc_no",""))}'
+            vl.at[idx, '_remark'] = f'Matched — Collection ({basis})'
             vl.at[idx, '_match_ref'] = str(crow.get('doc_no', ''))
             cl.at[crow['_idx'], '_matched'] = True
-            cl.at[crow['_idx'], '_remark'] = f'Matched - Collection ({basis}) | VL Doc: {str(vrow.get("doc_no",""))}'
+            cl.at[crow['_idx'], '_remark'] = f'Matched — Collection ({basis})'
             cl.at[crow['_idx'], '_match_ref'] = str(vrow.get('doc_no', ''))
             cl_col.at[crow.name, '_matched'] = True
             results['collection_matched'].append({
@@ -1258,8 +1258,9 @@ def main():
     </div>
     """, unsafe_allow_html=True)
 
-    # ── DETAILED SUMMARY TABLE ──
+    # ── DETAILED SUMMARY TABLE linked to Annexures ──
     st.markdown("### 📊 Reconciliation Summary")
+    st.caption("Click any 'View Annexure' button below to jump directly to that section.")
 
     inv_vl = len(results['invoice_matched']) + len(results['invoice_unmatched_vl'])
     inv_cl = len(results['invoice_matched']) + len(results['invoice_unmatched_cl'])
@@ -1269,88 +1270,47 @@ def main():
     col_cl = len(results['collection_matched']) + len(results['collection_unmatched_cl'])
 
     inv_pct = round(len(results['invoice_matched']) / inv_vl * 100, 1) if inv_vl else 0
-    dn_pct = round(len(results['dn_matched']) / dn_vl * 100, 1) if dn_vl else 0
+    dn_pct  = round(len(results['dn_matched']) / dn_vl * 100, 1) if dn_vl else 0
     col_pct = round(len(results['collection_matched']) / col_vl * 100, 1) if col_vl else 0
 
-    st.markdown(f"""
-    <table class="summary-table">
-        <thead>
-            <tr>
-                <th>Category</th>
-                <th class="num">VL Total</th>
-                <th class="num">Matched</th>
-                <th class="num">VL Unmatched</th>
-                <th class="num">CL Total</th>
-                <th class="num">CL Unmatched</th>
-                <th class="num">Match %</th>
-            </tr>
-        </thead>
-        <tbody>
-            <tr>
-                <td>🧾 Invoices</td>
-                <td class="num">{inv_vl}</td>
-                <td class="num matched-val">{len(results['invoice_matched'])}</td>
-                <td class="num unmatched-val">{len(results['invoice_unmatched_vl'])}</td>
-                <td class="num">{inv_cl}</td>
-                <td class="num unmatched-val">{len(results['invoice_unmatched_cl'])}</td>
-                <td class="num matched-val">{inv_pct}%</td>
-            </tr>
-            <tr>
-                <td>📝 Debit Notes</td>
-                <td class="num">{dn_vl}</td>
-                <td class="num matched-val">{len(results['dn_matched'])}</td>
-                <td class="num unmatched-val">{len(results['dn_unmatched_vl'])}</td>
-                <td class="num">{dn_cl}</td>
-                <td class="num unmatched-val">{len(results['dn_unmatched_cl'])}</td>
-                <td class="num matched-val">{dn_pct}%</td>
-            </tr>
-            <tr>
-                <td>💰 Collections</td>
-                <td class="num">{col_vl}</td>
-                <td class="num matched-val">{len(results['collection_matched'])}</td>
-                <td class="num unmatched-val">{len(results['collection_unmatched_vl'])}</td>
-                <td class="num">{col_cl}</td>
-                <td class="num unmatched-val">{len(results['collection_unmatched_cl'])}</td>
-                <td class="num matched-val">{col_pct}%</td>
-            </tr>
-            <tr>
-                <td>🔁 Reversed in VL — Also in CL</td>
-                <td class="num">{total_cross_ledger}</td>
-                <td class="num matched-val">{total_cross_ledger}</td>
-                <td class="num">—</td>
-                <td class="num">{total_cross_ledger}</td>
-                <td class="num">—</td>
-                <td class="num" style="color:#ff8c42;">⚠️ Review</td>
-            </tr>
-            <tr>
-                <td>🔄 Reversed in VL — Not in CL</td>
-                <td class="num">{total_vl_internal * 2}</td>
-                <td class="num matched-val">{total_vl_internal}</td>
-                <td class="num">—</td>
-                <td class="num">—</td>
-                <td class="num">—</td>
-                <td class="num matched-val">100%</td>
-            </tr>
-            <tr>
-                <td>❓ Reversal — Original Not Found</td>
-                <td class="num">{total_rev_unmatched}</td>
-                <td class="num">0</td>
-                <td class="num unmatched-val">{total_rev_unmatched}</td>
-                <td class="num">—</td>
-                <td class="num">—</td>
-                <td class="num unmatched-val">0%</td>
-            </tr>
-            <tr class="total-row">
-                <td><b>TOTAL</b></td>
-                <td class="num"><b>{inv_vl + dn_vl + col_vl}</b></td>
-                <td class="num matched-val"><b>{total_matched}</b></td>
-                <td class="num unmatched-val"><b>{total_unmatched_vl}</b></td>
-                <td class="num"><b>{inv_cl + dn_cl + col_cl}</b></td>
-                <td class="num unmatched-val"><b>{total_unmatched_cl}</b></td>
-                <td class="num matched-val"><b>—</b></td>
-            </tr>
-        </tbody>
-    </table>
+    # Summary rows: (label, vl_total, matched, vl_unmatched, cl_total, cl_unmatched, pct, tab_key, color)
+    summary_rows_ui = [
+        ('🧾 Invoices',          inv_vl, len(results['invoice_matched']),    len(results['invoice_unmatched_vl']),    inv_cl, len(results['invoice_unmatched_cl']),    f'{inv_pct}%',    'inv',  '#00d4aa'),
+        ('📝 Debit Notes',       dn_vl,  len(results['dn_matched']),          len(results['dn_unmatched_vl']),          dn_cl,  len(results['dn_unmatched_cl']),          f'{dn_pct}%',     'dn',   '#00d4aa'),
+        ('💰 Collections',       col_vl, len(results['collection_matched']),  len(results['collection_unmatched_vl']), col_cl, len(results['collection_unmatched_cl']),  f'{col_pct}%',    'col',  '#00d4aa'),
+        ('🔁 Reversed in VL — Also in CL', total_cross_ledger, total_cross_ledger, 0, total_cross_ledger, 0, '⚠️ Review', 'rev_cross', '#ff8c42'),
+        ('🔄 Reversed in VL — Not in CL',  total_vl_internal*2, total_vl_internal, 0, '-', '-', '✅ OK',    'rev_int',   '#00d4aa'),
+        ('❓ Reversal — Original Not Found',total_rev_unmatched, 0, total_rev_unmatched, '-', '-', '❌ 0%',  'rev_un',    '#ff4d6d'),
+    ]
+
+    # Render as styled rows with View Annexure buttons
+    for row in summary_rows_ui:
+        label, vl_tot, matched, vl_un, cl_tot, cl_un, pct, tab_key, color = row
+        col_a, col_b, col_c, col_d, col_e, col_f, col_g, col_h = st.columns([3, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.5])
+        col_a.markdown(f"**{label}**")
+        col_b.markdown(f"<div style='text-align:center'>{vl_tot}</div>", unsafe_allow_html=True)
+        col_c.markdown(f"<div style='text-align:center;color:{color};font-weight:700'>{matched}</div>", unsafe_allow_html=True)
+        col_d.markdown(f"<div style='text-align:center;color:#ff4d6d;font-weight:700'>{vl_un}</div>", unsafe_allow_html=True)
+        col_e.markdown(f"<div style='text-align:center'>{cl_tot}</div>", unsafe_allow_html=True)
+        col_f.markdown(f"<div style='text-align:center;color:#ff4d6d;font-weight:700'>{cl_un}</div>", unsafe_allow_html=True)
+        col_g.markdown(f"<div style='text-align:center;color:{color}'>{pct}</div>", unsafe_allow_html=True)
+        if col_h.button(f"View ↓", key=f"btn_{tab_key}"):
+            st.session_state['active_tab'] = tab_key
+        st.markdown("<hr style='margin:4px 0;border-color:#252c3d'>", unsafe_allow_html=True)
+
+    # Column headers above the rows
+    st.markdown("""
+    <div style='display:grid;grid-template-columns:3fr 1.2fr 1.2fr 1.2fr 1.2fr 1.2fr 1.2fr 1.5fr;
+                gap:8px;padding:6px 0;margin-bottom:4px;border-bottom:2px solid #4f8eff'>
+        <span style='font-size:0.68rem;color:#4f8eff;text-transform:uppercase;letter-spacing:.1em;font-weight:700'>Category</span>
+        <span style='font-size:0.68rem;color:#4f8eff;text-align:center;display:block'>VL Total</span>
+        <span style='font-size:0.68rem;color:#4f8eff;text-align:center;display:block'>Matched</span>
+        <span style='font-size:0.68rem;color:#4f8eff;text-align:center;display:block'>VL Unmatch</span>
+        <span style='font-size:0.68rem;color:#4f8eff;text-align:center;display:block'>CL Total</span>
+        <span style='font-size:0.68rem;color:#4f8eff;text-align:center;display:block'>CL Unmatch</span>
+        <span style='font-size:0.68rem;color:#4f8eff;text-align:center;display:block'>Match %</span>
+        <span style='font-size:0.68rem;color:#4f8eff;text-align:center;display:block'>Annexure</span>
+    </div>
     """, unsafe_allow_html=True)
 
     # ── DOWNLOAD ──
@@ -1364,16 +1324,16 @@ def main():
 
     st.markdown("---")
 
+    # Determine which tab to show based on summary button clicks
+    tab_map = {'inv': 0, 'dn': 1, 'col': 2, 'rev_cross': 3, 'rev_int': 3, 'rev_un': 3}
+    default_tab = tab_map.get(st.session_state.get('active_tab', 'inv'), 0)
+
     # ── DETAIL TABS ──
-    tabs = st.tabs([
-        "🧾 Invoices",
-        "📝 Debit Notes",
-        "💰 Collections",
-        "🔁 Reversals",
-        "⚠️ All Unmatched",
-    ])
+    tab_labels = ["🧾 Invoices", "📝 Debit Notes", "💰 Collections", "🔁 Reversals", "⚠️ All Unmatched"]
+    tabs = st.tabs(tab_labels)
 
     with tabs[0]:
+        st.markdown('<a name="inv"></a>', unsafe_allow_html=True)
         st.markdown('<span class="section-tag tag-matched">MATCHED INVOICES</span>', unsafe_allow_html=True)
         display_df(results['invoice_matched'])
         c1, c2 = st.columns(2)
@@ -1385,6 +1345,7 @@ def main():
             display_df(results['invoice_unmatched_cl'])
 
     with tabs[1]:
+        st.markdown('<a name="dn"></a>', unsafe_allow_html=True)
         st.markdown('<span class="section-tag tag-matched">MATCHED DEBIT NOTES</span>', unsafe_allow_html=True)
         display_df(results['dn_matched'])
         c1, c2 = st.columns(2)
@@ -1396,6 +1357,7 @@ def main():
             display_df(results['dn_unmatched_cl'])
 
     with tabs[2]:
+        st.markdown('<a name="col"></a>', unsafe_allow_html=True)
         st.markdown('<span class="section-tag tag-matched">MATCHED COLLECTIONS</span>', unsafe_allow_html=True)
         display_df(results['collection_matched'])
         c1, c2 = st.columns(2)
@@ -1407,25 +1369,27 @@ def main():
             display_df(results['collection_unmatched_cl'])
 
     with tabs[3]:
-        # ── Sub-category A: Reversed in VL AND present in CL ──
-        st.markdown('<span class="section-tag tag-partial">⚠️ REVERSED IN VL — INVOICE ALSO IN CUSTOMER LEDGER</span>', unsafe_allow_html=True)
-        st.caption("These invoices were reversed in the Vendor Ledger but the original invoice also exists in the Customer Ledger. This needs review — the customer may not be aware of the reversal.")
+        st.markdown('<a name="rev_cross"></a>', unsafe_allow_html=True)
+        # ── Annexure A: Reversed in VL AND present in CL ──
+        st.markdown('<span class="section-tag tag-partial">⚠️ ANNEXURE A — REVERSED IN VL | INVOICE ALSO IN CUSTOMER LEDGER</span>', unsafe_allow_html=True)
+        st.caption("These invoices were reversed in the Vendor Ledger but the original invoice also exists in the Customer Ledger. Needs review — customer may not be aware of the reversal.")
         display_df(results['reversal_cross_ledger'])
 
         st.markdown("---")
+        st.markdown('<a name="rev_int"></a>', unsafe_allow_html=True)
 
-        # ── Sub-category B: Pure VL internal reversal ──
-        st.markdown('<span class="section-tag tag-matched">✅ REVERSED IN VL — NOT IN CUSTOMER LEDGER</span>', unsafe_allow_html=True)
-        st.caption("Original invoice and its reversal both exist only in Vendor Ledger. Not present in Customer Ledger — no cross-ledger impact.")
+        # ── Annexure B: Pure VL internal reversal ──
+        st.markdown('<span class="section-tag tag-matched">✅ ANNEXURE B — REVERSED IN VL | NOT IN CUSTOMER LEDGER</span>', unsafe_allow_html=True)
+        st.caption("Original invoice and its reversal both exist only in Vendor Ledger. No cross-ledger impact.")
         display_df(results['reversal_vl_internal'])
 
         st.markdown("---")
+        st.markdown('<a name="rev_un"></a>', unsafe_allow_html=True)
 
-        # ── Sub-category C: Reversal with no original found ──
-        if results['reversal_unmatched']:
-            st.markdown('<span class="section-tag tag-unmatched">❓ REVERSAL ENTRIES — ORIGINAL NOT FOUND IN VL</span>', unsafe_allow_html=True)
-            st.caption("Reversal entries for which the original invoice could not be located in the Vendor Ledger.")
-            display_df(results['reversal_unmatched'])
+        # ── Annexure C: Reversal with no original found ──
+        st.markdown('<span class="section-tag tag-unmatched">❓ ANNEXURE C — REVERSAL ENTRY | ORIGINAL NOT FOUND / AMOUNT MISMATCH</span>', unsafe_allow_html=True)
+        st.caption("Reversal entries where the original invoice could not be found in VL, or the amount did not match.")
+        display_df(results['reversal_unmatched'])
 
     with tabs[4]:
         all_unmatched = []
