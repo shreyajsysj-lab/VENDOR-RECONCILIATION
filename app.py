@@ -425,12 +425,9 @@ def load_vendor_ledger(file):
 
 
 def load_customer_ledger(file):
-    # ── Read raw file first to grab closing balance before any filtering ──
-    raw = pd.read_excel(file, header=None)
-
-    # Find header row
+    df = pd.read_excel(file, header=None)
     header_row = None
-    for i, row in raw.iterrows():
+    for i, row in df.iterrows():
         vals = [str(v).lower() for v in row if not pd.isna(v)]
         if any('document' in v for v in vals) and any('debit' in v or 'credit' in v for v in vals):
             header_row = i
@@ -438,27 +435,10 @@ def load_customer_ledger(file):
     if header_row is None:
         header_row = 0
 
-    # Set column names from header row
-    raw.columns = raw.iloc[header_row]
-    raw = raw.iloc[header_row + 1:].reset_index(drop=True)
-    raw.columns = [str(c).strip() for c in raw.columns]
+    df.columns = df.iloc[header_row]
+    df = df.iloc[header_row + 1:].reset_index(drop=True)
+    df.columns = [str(c).strip() for c in df.columns]
 
-    # ── Find closing balance column in raw (before any row filtering) ──
-    closing_col_raw = None
-    for c in raw.columns:
-        if any(k in c.lower() for k in ['closing', 'balance']):
-            closing_col_raw = c
-            break
-
-    # Extract closing balance = last non-null value from closing column
-    _cl_closing = None
-    if closing_col_raw:
-        closing_series = pd.to_numeric(raw[closing_col_raw], errors='coerce').dropna()
-        if not closing_series.empty:
-            _cl_closing = closing_series.iloc[-1]
-
-    # ── Now proceed with normal column mapping ──
-    df = raw.copy()
     col_map = {}
     for c in df.columns:
         cl = c.lower()
@@ -476,24 +456,21 @@ def load_customer_ledger(file):
             col_map[c] = 'closing'
     df = df.rename(columns=col_map)
 
-    needed = ['doc_date', 'doc_no', 'doc_type', 'debit', 'credit']
+    needed = ['doc_date', 'doc_no', 'doc_type', 'debit', 'credit', 'closing']
     for col in needed:
         if col not in df.columns:
             df[col] = np.nan
 
     df['doc_date'] = pd.to_datetime(df['doc_date'], errors='coerce', dayfirst=True)
-    df['debit']  = pd.to_numeric(df['debit'],  errors='coerce').fillna(0)
-    df['credit'] = pd.to_numeric(df['credit'], errors='coerce').fillna(0)
-
+    df['debit']   = pd.to_numeric(df['debit'],   errors='coerce').fillna(0)
+    df['credit']  = pd.to_numeric(df['credit'],  errors='coerce').fillna(0)
+    df['closing'] = pd.to_numeric(df['closing'], errors='coerce')
     df['doc_no_clean'] = df['doc_no'].apply(clean_doc_number)
     df['period']       = df['doc_date'].apply(get_period)
     df = df[df['doc_no_clean'] != ''].reset_index(drop=True)
     df['_idx']       = df.index
     df['_remark']    = ''
     df['_match_ref'] = ''
-
-    # Store the closing balance read from file column
-    df['_cl_closing'] = _cl_closing
     return df
 
 # ─────────────────────────────────────────────
@@ -1636,17 +1613,9 @@ def main():
             st.error(f"Error reading files: {e}")
             return
 
-    # Closing balances
-    # VL: from closing balance column in the file (last non-null value)
+    # Closing balances — both read identically from the 'closing' column in the file
     vl_closing = vl['closing'].dropna().iloc[-1] if 'closing' in vl.columns and not vl['closing'].dropna().empty else None
-
-    # CL: read directly from closing balance column in file (last non-null value)
-    # No formula used — taken purely from the column in the uploaded file
-    if '_cl_closing' in cl.columns:
-        _cl_vals = pd.to_numeric(cl['_cl_closing'], errors='coerce').dropna()
-        cl_closing = float(_cl_vals.iloc[0]) if not _cl_vals.empty else None
-    else:
-        cl_closing = None
+    cl_closing = cl['closing'].dropna().iloc[-1] if 'closing' in cl.columns and not cl['closing'].dropna().empty else None
 
     st.success(f"✅ {VL}: **{len(vl)}** rows  ·  {CL}: **{len(cl)}** rows")
 
@@ -1659,10 +1628,9 @@ def main():
             st.info(f"📘 **{VL} Closing Balance:** Not detected in file")
     with cb2:
         if cl_closing is not None:
-            # Detect which method was used
-            st.info(f"📗 **{CL} Closing Balance:** {fmt_inr(cl_closing)}  *(from Closing Balance column in file)*")
+            st.info(f"📗 **{CL} Closing Balance:** {fmt_inr(cl_closing)}")
         else:
-            st.info(f"📗 **{CL} Closing Balance:** Not detected")
+            st.info(f"📗 **{CL} Closing Balance:** Not detected in file")
 
     with st.expander("👁 Preview Parsed Data"):
         pc1, pc2 = st.columns(2)
