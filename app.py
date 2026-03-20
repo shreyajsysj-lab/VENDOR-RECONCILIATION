@@ -1717,7 +1717,44 @@ def main():
     total_un_cl_cnt   = inv_un_cl_cnt + dn_un_cl_cnt + col_un_cl_cnt
     total_un_cl_val   = inv_un_cl_val + dn_un_cl_val + col_un_cl_val
 
-    # ── STAT CARDS ──
+    # ── DOWNLOAD BUTTON — TOP, PROMINENT ──
+    st.markdown("""
+    <style>
+    div[data-testid="stDownloadButton"] > button {
+        background: linear-gradient(135deg, #1a6b45, #00d4aa) !important;
+        color: white !important;
+        font-family: 'Syne', sans-serif !important;
+        font-size: 1.1rem !important;
+        font-weight: 800 !important;
+        padding: 0.85rem 2rem !important;
+        border-radius: 10px !important;
+        border: none !important;
+        letter-spacing: 0.04em !important;
+        box-shadow: 0 4px 18px rgba(0,212,170,0.35) !important;
+        transition: all 0.2s !important;
+    }
+    div[data-testid="stDownloadButton"] > button:hover {
+        opacity: 0.9 !important;
+        transform: translateY(-2px) !important;
+        box-shadow: 0 6px 24px rgba(0,212,170,0.5) !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+    try:
+        excel_data = build_excel(results, vl_ann_df, cl_ann_df, VL, CL)
+        st.download_button(
+            label="⬇️  Download Ledger Reconciliation Report (.xlsx)",
+            data=excel_data,
+            file_name=f"Recon_{VL}_{CL}_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+            key="download_top",
+        )
+    except Exception as e:
+        st.error(f"Error generating Excel: {e}")
+
+    st.markdown("---")
     st.markdown(f"""
     <div class="stat-grid">
         <div class="stat-card matched">
@@ -1895,16 +1932,16 @@ def main():
         with rs2:
             st.markdown(f"<div style='background:{bg};color:{fg};padding:7px 14px;border-bottom:1px solid #252c3d;font-size:0.83rem;font-weight:{fw};text-align:right'>{amount}</div>", unsafe_allow_html=True)
 
-    # ── DOWNLOAD ──
+    # ── DOWNLOAD (bottom — secondary) ──
     st.markdown("---")
     try:
-        excel_data = build_excel(results, vl_ann_df, cl_ann_df, VL, CL)
         st.download_button(
-            label="⬇️  Download Full Reconciliation Report (.xlsx)",
+            label="⬇️  Download Reconciliation Report",
             data=excel_data,
             file_name=f"Recon_{VL}_{CL}_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
+            use_container_width=False,
+            key="download_bottom",
         )
     except Exception as e:
         st.error(f"Error generating Excel: {e}")
