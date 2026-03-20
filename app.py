@@ -1663,6 +1663,9 @@ def main():
         results['vl_name'] = VL
         results['cl_name'] = CL
         st.session_state['results'] = results
+        # Clear cached excel so it regenerates fresh with new results
+        st.session_state.pop('excel_data', None)
+        st.session_state.pop('excel_key', None)
 
     if 'results' not in st.session_state:
         return
@@ -1717,7 +1720,7 @@ def main():
     total_un_cl_cnt   = inv_un_cl_cnt + dn_un_cl_cnt + col_un_cl_cnt
     total_un_cl_val   = inv_un_cl_val + dn_un_cl_val + col_un_cl_val
 
-    # ── DOWNLOAD BUTTON — TOP, PROMINENT ──
+    # ── DOWNLOAD CSS (styling only — button rendered after stats) ──
     st.markdown("""
     <style>
     div[data-testid="stDownloadButton"] > button {
@@ -1741,8 +1744,19 @@ def main():
     </style>
     """, unsafe_allow_html=True)
 
-    try:
-        excel_data = build_excel(results, vl_ann_df, cl_ann_df, VL, CL)
+    # Build Excel once and cache in session_state to avoid re-running on every interaction
+    if 'excel_data' not in st.session_state or st.session_state.get('excel_key') != id(results):
+        try:
+            st.session_state['excel_data'] = build_excel(results, vl_ann_df, cl_ann_df, VL, CL)
+            st.session_state['excel_key'] = id(results)
+        except Exception as e:
+            st.session_state['excel_data'] = None
+            st.error(f"Error generating Excel report: {e}")
+
+    excel_data = st.session_state.get('excel_data')
+
+    # ── TOP DOWNLOAD BUTTON ──
+    if excel_data:
         st.download_button(
             label="⬇️  Download Ledger Reconciliation Report (.xlsx)",
             data=excel_data,
@@ -1751,8 +1765,6 @@ def main():
             use_container_width=True,
             key="download_top",
         )
-    except Exception as e:
-        st.error(f"Error generating Excel: {e}")
 
     st.markdown("---")
     st.markdown(f"""
@@ -1934,7 +1946,7 @@ def main():
 
     # ── DOWNLOAD (bottom — secondary) ──
     st.markdown("---")
-    try:
+    if excel_data:
         st.download_button(
             label="⬇️  Download Reconciliation Report",
             data=excel_data,
@@ -1943,8 +1955,6 @@ def main():
             use_container_width=False,
             key="download_bottom",
         )
-    except Exception as e:
-        st.error(f"Error generating Excel: {e}")
     st.markdown("---")
 
     # Determine active tab from summary button clicks
