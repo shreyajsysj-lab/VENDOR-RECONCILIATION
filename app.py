@@ -891,109 +891,164 @@ def build_excel(results, vl_orig, cl_orig):
         return cell
 
     # ══════════════════════════════════════════
-    # SHEET 1: SUMMARY
+    # SHEET 1: SUMMARY (mirrors dashboard)
     # ══════════════════════════════════════════
     ws_sum = wb.active
     ws_sum.title = 'Summary'
     ws_sum.sheet_view.showGridLines = False
 
-    # Title
-    ws_sum.merge_cells('A1:H1')
-    title_cell = ws_sum['A1']
-    title_cell.value = '⚖️ VENDOR RECONCILIATION SUMMARY'
-    title_cell.font = Font(bold=True, size=14, color='FFFFFF', name='Calibri')
-    title_cell.fill = PatternFill(fill_type='solid', fgColor='1C2130')
-    title_cell.alignment = Alignment(horizontal='center', vertical='center')
-    ws_sum.row_dimensions[1].height = 35
+    # ── Title ──
+    ws_sum.merge_cells('A1:I1')
+    tc = ws_sum['A1']
+    tc.value = '⚖️  VENDOR RECONCILIATION SUMMARY'
+    tc.font = Font(bold=True, size=14, color='FFFFFF', name='Calibri')
+    tc.fill = PatternFill(fill_type='solid', fgColor='1C2130')
+    tc.alignment = Alignment(horizontal='center', vertical='center')
+    ws_sum.row_dimensions[1].height = 38
 
     ws_sum['A2'].value = f'Generated on: {datetime.now().strftime("%d-%b-%Y %H:%M")}'
-    ws_sum['A2'].font = Font(italic=True, size=9, color='888888')
-    ws_sum.row_dimensions[2].height = 18
+    ws_sum['A2'].font = Font(italic=True, size=9, color='888888', name='Calibri')
+    ws_sum.row_dimensions[2].height = 16
 
-    # Section: Reconciliation Overview
-    headers = ['Category', 'Total (VL)', 'Matched', 'Unmatched (VL)', 'Total (CL)', 'Matched', 'Unmatched (CL)', 'Remarks']
-    style_header(ws_sum, headers, row=4, color='1A3A6B')
+    # ── Column headers row 4 ──
+    col_headers = ['Category', 'VL Total', 'Matched', 'VL Unmatched',
+                   'CL Total', 'CL Unmatched', 'Match %', 'Remarks', 'Annexure Sheet']
+    for c_idx, h in enumerate(col_headers, 1):
+        cell = ws_sum.cell(row=4, column=c_idx, value=h)
+        cell.font = Font(bold=True, color='FFFFFF', name='Calibri', size=10)
+        cell.fill = PatternFill(fill_type='solid', fgColor='1A3A6B')
+        cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+        cell.border = border
+    ws_sum.row_dimensions[4].height = 28
 
+    # ── Compute values ──
     inv_vl_total = len(results['invoice_matched']) + len(results['invoice_unmatched_vl'])
     inv_cl_total = len(results['invoice_matched']) + len(results['invoice_unmatched_cl'])
-    dn_vl_total = len(results['dn_matched']) + len(results['dn_unmatched_vl'])
-    dn_cl_total = len(results['dn_matched']) + len(results['dn_unmatched_cl'])
+    dn_vl_total  = len(results['dn_matched']) + len(results['dn_unmatched_vl'])
+    dn_cl_total  = len(results['dn_matched']) + len(results['dn_unmatched_cl'])
     col_vl_total = len(results['collection_matched']) + len(results['collection_unmatched_vl'])
     col_cl_total = len(results['collection_matched']) + len(results['collection_unmatched_cl'])
+    rcl = len(results['reversal_cross_ledger'])
+    rvl = len(results['reversal_vl_internal'])
+    run = len(results['reversal_unmatched'])
 
-    summary_rows = [
-        ['Invoices', inv_vl_total, len(results['invoice_matched']), len(results['invoice_unmatched_vl']),
-         inv_cl_total, len(results['invoice_matched']), len(results['invoice_unmatched_cl']), 'Matched by Document Number'],
-        ['Debit Notes', dn_vl_total, len(results['dn_matched']), len(results['dn_unmatched_vl']),
-         dn_cl_total, len(results['dn_matched']), len(results['dn_unmatched_cl']), 'Matched by Doc No / Period+Amount'],
-        ['Collections', col_vl_total, len(results['collection_matched']), len(results['collection_unmatched_vl']),
-         col_cl_total, len(results['collection_matched']), len(results['collection_unmatched_cl']), 'Matched by UTR / Period+Amount'],
-        ['Reversals - Cross Ledger (VL reversed + in CL)',
-         len(results['reversal_cross_ledger']),
-         len(results['reversal_cross_ledger']), 0,
-         len(results['reversal_cross_ledger']), len(results['reversal_cross_ledger']), 0,
-         'Invoice Reversed in VL but Present in CL'],
-        ['Reversals - VL Internal (not in CL)',
-         len(results['reversal_vl_internal']) * 2,
-         len(results['reversal_vl_internal']), 0,
-         '-', '-', '-', 'Reversed in VL Only - No CL Impact'],
-        ['Reversals - Original Not Found',
-         len(results['reversal_unmatched']), 0,
-         len(results['reversal_unmatched']),
-         '-', '-', '-', 'Reversal entry without matching original'],
+    inv_pct = f"{round(len(results['invoice_matched'])/inv_vl_total*100,1)}%" if inv_vl_total else '0%'
+    dn_pct  = f"{round(len(results['dn_matched'])/dn_vl_total*100,1)}%" if dn_vl_total else '0%'
+    col_pct = f"{round(len(results['collection_matched'])/col_vl_total*100,1)}%" if col_vl_total else '0%'
+
+    # Each row: (label, vl_tot, matched, vl_un, cl_tot, cl_un, pct, remarks, sheet_name, row_fill)
+    sum_rows = [
+        ('Invoices',
+         inv_vl_total, len(results['invoice_matched']), len(results['invoice_unmatched_vl']),
+         inv_cl_total, len(results['invoice_unmatched_cl']),
+         inv_pct, 'Matched by Document Number',
+         'Inv - Matched', 'E8F5EE'),
+
+        ('Debit Notes',
+         dn_vl_total, len(results['dn_matched']), len(results['dn_unmatched_vl']),
+         dn_cl_total, len(results['dn_unmatched_cl']),
+         dn_pct, 'Matched by Doc No / Period+Amount',
+         'DN - Matched', 'E8F5EE'),
+
+        ('Collections',
+         col_vl_total, len(results['collection_matched']), len(results['collection_unmatched_vl']),
+         col_cl_total, len(results['collection_unmatched_cl']),
+         col_pct, 'Matched by UTR / Period+Amount',
+         'Collections - Matched', 'E8F5EE'),
+
+        ('Reversal — Also in CL (Annexure A)',
+         rcl, rcl, 0,
+         rcl, 0,
+         '⚠️ Review', 'Invoice Reversed in VL but Present in CL',
+         'Reversal - Cross Ledger', 'FFF3CD'),
+
+        ('Reversal — Not in CL (Annexure B)',
+         rvl * 2, rvl, 0,
+         '-', '-',
+         '100%', 'Reversed in VL Only — No CL Impact',
+         'Reversal - VL Internal', 'E8F5EE'),
+
+        ('Reversal — Original Not Found (Annexure C)',
+         run, 0, run,
+         '-', '-',
+         '0%', 'Reversal Entry — Original Not Found / Amount Mismatch',
+         'Reversal - Unmatched', 'FFE0E0'),
     ]
 
-    row_colors = ['FFFFFF', 'F8F9FB', 'FFFFFF', 'FFF9E6', 'F0F4FF', 'FFF0F0']
-    for r_idx, row_data in enumerate(summary_rows, 5):
-        fill = row_colors[(r_idx - 5) % len(row_colors)]
-        for c_idx, val in enumerate(row_data, 1):
+    for r_idx, row_data in enumerate(sum_rows, 5):
+        label, vl_t, matched, vl_un, cl_t, cl_un, pct, remarks, sheet_name, fill_hex = row_data
+        values = [label, vl_t, matched, vl_un, cl_t, cl_un, pct, remarks, sheet_name]
+
+        for c_idx, val in enumerate(values, 1):
             cell = ws_sum.cell(row=r_idx, column=c_idx, value=val)
-            cell.fill = PatternFill(fill_type='solid', fgColor=fill)
+            cell.fill = PatternFill(fill_type='solid', fgColor=fill_hex)
             cell.border = border
             cell.font = Font(name='Calibri', size=10)
-            cell.alignment = Alignment(vertical='center')
-            if c_idx in [3, 6]:  # matched cols - green
+            cell.alignment = Alignment(vertical='center', wrap_text=(c_idx == 8))
+
+            # Matched column — green bold
+            if c_idx == 3:
                 cell.font = Font(name='Calibri', size=10, color='1A6B45', bold=True)
-            if c_idx in [4, 7]:  # unmatched cols - red
+            # Unmatched column — red bold
+            if c_idx == 4:
                 cell.font = Font(name='Calibri', size=10, color='A32035', bold=True)
+            # Match % column
+            if c_idx == 7:
+                cell.alignment = Alignment(horizontal='center', vertical='center')
+                if '⚠️' in str(val) or '0%' == str(val):
+                    cell.font = Font(name='Calibri', size=10, color='A32035', bold=True)
+                else:
+                    cell.font = Font(name='Calibri', size=10, color='1A6B45', bold=True)
+            # Annexure column — hyperlink to sheet
+            if c_idx == 9:
+                cell.value = f'→ See: {sheet_name}'
+                cell.font = Font(name='Calibri', size=10, color='1A6BCC',
+                                 bold=True, underline='single')
+                cell.alignment = Alignment(horizontal='center', vertical='center')
+
         ws_sum.row_dimensions[r_idx].height = 22
 
-    # Total row
-    total_row = r_idx + 1
-    totals = [
-        'TOTAL',
-        inv_vl_total + dn_vl_total + col_vl_total,
-        len(results['invoice_matched']) + len(results['dn_matched']) + len(results['collection_matched']),
-        len(results['invoice_unmatched_vl']) + len(results['dn_unmatched_vl']) + len(results['collection_unmatched_vl']),
-        inv_cl_total + dn_cl_total + col_cl_total,
-        len(results['invoice_matched']) + len(results['dn_matched']) + len(results['collection_matched']),
-        len(results['invoice_unmatched_cl']) + len(results['dn_unmatched_cl']) + len(results['collection_unmatched_cl']),
-        '',
-    ]
+    # ── TOTAL row ──
+    total_row = len(sum_rows) + 5
+    total_matched = len(results['invoice_matched']) + len(results['dn_matched']) + len(results['collection_matched'])
+    total_un_vl   = len(results['invoice_unmatched_vl']) + len(results['dn_unmatched_vl']) + len(results['collection_unmatched_vl'])
+    total_un_cl   = len(results['invoice_unmatched_cl']) + len(results['dn_unmatched_cl']) + len(results['collection_unmatched_cl'])
+    totals = ['TOTAL', inv_vl_total + dn_vl_total + col_vl_total,
+              total_matched, total_un_vl,
+              inv_cl_total + dn_cl_total + col_cl_total, total_un_cl,
+              '', '', '']
     for c_idx, val in enumerate(totals, 1):
         cell = ws_sum.cell(row=total_row, column=c_idx, value=val)
         cell.fill = PatternFill(fill_type='solid', fgColor='1C2130')
-        cell.font = Font(bold=True, color='FFFFFF', name='Calibri', size=10)
+        cell.font = Font(bold=True, color='FFFFFF', name='Calibri', size=11)
         cell.border = border
         cell.alignment = Alignment(horizontal='center', vertical='center')
-    ws_sum.row_dimensions[total_row].height = 25
+    ws_sum.row_dimensions[total_row].height = 26
 
-    # Match % row
+    # ── Match % row ──
     pct_row = total_row + 1
-    vl_match_pct = round(totals[2] / totals[1] * 100, 1) if totals[1] else 0
-    cl_match_pct = round(totals[5] / totals[4] * 100, 1) if totals[4] else 0
-    ws_sum.cell(row=pct_row, column=1, value='Match Rate')
-    ws_sum.cell(row=pct_row, column=3, value=f'{vl_match_pct}%')
-    ws_sum.cell(row=pct_row, column=6, value=f'{cl_match_pct}%')
-    for c in [1, 3, 6]:
+    ovr_pct = round(total_matched / (inv_vl_total + dn_vl_total + col_vl_total) * 100, 1) if (inv_vl_total + dn_vl_total + col_vl_total) else 0
+    ws_sum.cell(row=pct_row, column=1, value='Overall Match Rate')
+    ws_sum.cell(row=pct_row, column=3, value=f'{ovr_pct}%')
+    ws_sum.cell(row=pct_row, column=8, value='Green = Matched | Red = Unmatched | Orange = Needs Review')
+    for c in [1, 3, 8]:
         cell = ws_sum.cell(row=pct_row, column=c)
-        cell.font = Font(bold=True, color='1A6B45', name='Calibri', size=11)
+        cell.font = Font(bold=True, color='1A6B45', name='Calibri', size=10)
         cell.fill = PatternFill(fill_type='solid', fgColor='E8F5EE')
         cell.border = border
         cell.alignment = Alignment(horizontal='center', vertical='center')
-    ws_sum.row_dimensions[pct_row].height = 22
+    ws_sum.row_dimensions[pct_row].height = 20
 
-    auto_width(ws_sum)
+    # ── Column widths ──
+    ws_sum.column_dimensions['A'].width = 38
+    ws_sum.column_dimensions['B'].width = 12
+    ws_sum.column_dimensions['C'].width = 12
+    ws_sum.column_dimensions['D'].width = 14
+    ws_sum.column_dimensions['E'].width = 12
+    ws_sum.column_dimensions['F'].width = 14
+    ws_sum.column_dimensions['G'].width = 12
+    ws_sum.column_dimensions['H'].width = 42
+    ws_sum.column_dimensions['I'].width = 28
 
     # ══════════════════════════════════════════
     # SHEET 2: VENDOR LEDGER WITH REMARKS
@@ -1018,12 +1073,12 @@ def build_excel(results, vl_orig, cl_orig):
 
     for r_idx, (_, row) in enumerate(vl_ann[vl_display_cols].iterrows(), 2):
         remark = str(row.get('_remark', ''))
-        if 'Unmatched' in remark:
-            fill = COLORS['unmatched_fill']
+        if 'Unmatched' in remark or 'Mismatch' in remark or 'Not Found' in remark:
+            fill = COLORS['unmatched_fill']   # RED
         elif 'Reversal' in remark or 'Reversed' in remark:
-            fill = COLORS['reversal_fill']
+            fill = COLORS['reversal_fill']     # YELLOW/ORANGE
         else:
-            fill = COLORS['matched_fill']
+            fill = COLORS['matched_fill']      # GREEN
 
         for c_idx, col in enumerate(vl_display_cols, 1):
             val = row[col]
@@ -1212,9 +1267,19 @@ def main():
     if st.button("▶ Run Reconciliation", use_container_width=False):
         with st.spinner("Running reconciliation engine..."):
             results = run_reconciliation(vl, cl, tolerance=tolerance)
-        # Store only serializable data — annotated ledgers stored as JSON-safe dicts
-        results['vl_annotated'] = results['vl_annotated'].astype(str).to_dict('records')
-        results['cl_annotated'] = results['cl_annotated'].astype(str).to_dict('records')
+
+        # Preserve annotated ledgers — convert to records but keep numeric cols as numbers
+        def safe_records(df):
+            d = df.copy()
+            for col in d.columns:
+                if col.startswith('_'):
+                    d[col] = d[col].astype(str).replace('nan', '')
+                elif d[col].dtype == object:
+                    d[col] = d[col].fillna('').astype(str)
+            return d.to_dict('records')
+
+        results['vl_annotated'] = safe_records(results['vl_annotated'])
+        results['cl_annotated'] = safe_records(results['cl_annotated'])
         st.session_state['results'] = results
 
     if 'results' not in st.session_state:
@@ -1314,14 +1379,18 @@ def main():
     """, unsafe_allow_html=True)
 
     # ── DOWNLOAD ──
-    excel_data = build_excel(results, vl_ann_df, cl_ann_df)
-    st.download_button(
-        label="⬇ Download Full Reconciliation Report (.xlsx)",
-        data=excel_data,
-        file_name=f"VendorSync_Reconciliation_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
-
+    st.markdown("---")
+    try:
+        excel_data = build_excel(results, vl_ann_df, cl_ann_df)
+        st.download_button(
+            label="⬇️  Download Full Reconciliation Report (.xlsx)",
+            data=excel_data,
+            file_name=f"VendorSync_Reconciliation_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
+    except Exception as e:
+        st.error(f"Error generating Excel: {e}")
     st.markdown("---")
 
     # Determine which tab to show based on summary button clicks
