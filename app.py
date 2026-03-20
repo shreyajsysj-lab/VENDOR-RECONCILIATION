@@ -303,31 +303,29 @@ def is_debit_note(doc_type):
 
 def is_reversal_type(doc_type):
     """
-    Detect ONLY genuine reversal entries:
-    Complete Reversal, Saleable Return, Sales Return.
-    Credit Notes are NOT reversals — they are separate doc types
-    and should be matched as invoices.
+    Detect ONLY Complete Reversal entries.
+    Saleable Return / Non-Saleable Return / Sales Return are treated as Credit Notes (not reversals).
     """
     if pd.isna(doc_type):
         return False
     s = str(doc_type).upper()
-    # Exact / strict reversal keywords only
-    return any(k in s for k in [
-        'COMPLETE REVERSAL',
-        'SALEABLE RETURN',
-        'SALES RETURN',
-        'SALE RETURN',
-    ])
+    return 'COMPLETE REVERSAL' in s
 
 def is_credit_note(doc_type):
     """
-    Credit Notes / Credit entries in VL.
+    Credit Notes in VL — includes:
+    - Credit Note / Credit Memo / Credit
+    - Saleable Return / Non-Saleable Return (these are credit-type entries, NOT reversals)
     These are matched against Discount Debit Notes and PRN entries in CL.
     """
     if pd.isna(doc_type):
         return False
     s = str(doc_type).upper()
-    return any(k in s for k in ['CREDIT NOTE', 'CREDIT MEMO', 'CREDIT'])
+    return any(k in s for k in [
+        'CREDIT NOTE', 'CREDIT MEMO', 'CREDIT',
+        'SALEABLE RETURN', 'NON SALEABLE', 'NON-SALEABLE',
+        'NONSALEABLE', 'SALE RETURN', 'SALES RETURN',
+    ])
 
 def is_discount_or_prn(doc_type, doc_no=""):
     """
@@ -464,6 +462,14 @@ def load_customer_ledger(file):
     df['doc_date'] = pd.to_datetime(df['doc_date'], errors='coerce', dayfirst=True)
     df['debit'] = pd.to_numeric(df['debit'], errors='coerce').fillna(0)
     df['credit'] = pd.to_numeric(df['credit'], errors='coerce').fillna(0)
+
+    # Try to detect closing balance column in CL
+    closing_cols = [c for c in df.columns if any(k in c.lower() for k in ['closing','balance'])]
+    if closing_cols:
+        df['closing'] = pd.to_numeric(df[closing_cols[0]], errors='coerce')
+    else:
+        df['closing'] = np.nan
+
     df['doc_no_clean'] = df['doc_no'].apply(clean_doc_number)
     df['period'] = df['doc_date'].apply(get_period)
     df = df[df['doc_no_clean'] != ''].reset_index(drop=True)
@@ -1416,7 +1422,7 @@ def build_excel(results, vl_orig, cl_orig, VL='Vendor', CL='Customer'):
     # ══════════════════════════════════════════
     # RECON STATEMENT SHEET
     # ══════════════════════════════════════════
-    ws_rs = wb.create_sheet('Recon Statement')
+    ws_rs = wb.create_sheet('Recon Statement', 1)
     ws_rs.sheet_view.showGridLines = False
     ws_rs.column_dimensions['A'].width = 58
     ws_rs.column_dimensions['B'].width = 22
@@ -1432,7 +1438,8 @@ def build_excel(results, vl_orig, cl_orig, VL='Vendor', CL='Customer'):
     col_un_cl_v  = ssum(results['collection_unmatched_cl'],'Debit') + ssum(results['collection_unmatched_cl'],'Credit')
     cn_v         = ssum([r for r in results['dn_matched'] if 'Credit Note' in str(r.get('Match Type',''))], 'VL Debit') +                    ssum([r for r in results['dn_matched'] if 'Credit Note' in str(r.get('Match Type',''))], 'VL Credit')
     rev_cross_v  = ssum(results['reversal_cross_ledger'], 'VL Original Debit') + ssum(results['reversal_cross_ledger'], 'VL Original Credit')
-    vl_close     = results.get('vl_closing') or 0.0
+    vl_close  = results.get('vl_closing') or 0.0
+    cl_close  = results.get('cl_closing') or (inv_un_cl_v - inv_un_vl_v)
 
     rs_rows = [
         ('Particular', 'Amount (₹)', 'H'),
@@ -1446,7 +1453,7 @@ def build_excel(results, vl_orig, cl_orig, VL='Vendor', CL='Customer'):
         ('', '', 'B'),
         (f'Net Balance as per {VL} Books — B', '=SUM(B2:B8)', 'T'),
         ('', '', 'B'),
-        (f'Balance as per {CL} Books — C', inv_un_cl_v - inv_un_vl_v, 'CL'),
+        (f'Balance as per {CL} Books — C', cl_close, 'CL'),
         ('', '', 'B'),
         ('Unreconciled Difference (B - C)', '=B10-B12', 'D'),
         ('(This value should be zero after all the adjustments)', '', 'N'),
@@ -1607,13 +1614,27 @@ def main():
             st.error(f"Error reading files: {e}")
             return
 
-    # Closing balances
+    # Closing balances — VL from closing column, CL from closing column or debit-credit sum
     vl_closing = vl['closing'].dropna().iloc[-1] if 'closing' in vl.columns and not vl['closing'].dropna().empty else None
-    cl_closing = (cl['debit'].sum() - cl['credit'].sum()) if 'debit' in cl.columns else None
+    if 'closing' in cl.columns and not cl['closing'].dropna().empty:
+        cl_closing = cl['closing'].dropna().iloc[-1]
+    else:
+        cl_closing = cl['debit'].sum() - cl['credit'].sum() if 'debit' in cl.columns else None
 
     st.success(f"✅ {VL}: **{len(vl)}** rows  ·  {CL}: **{len(cl)}** rows")
-    if vl_closing is not None:
-        st.info(f"📘 **{VL} Closing Balance:** {fmt_inr(vl_closing)}")
+
+    # Show both closing balances side by side
+    cb1, cb2 = st.columns(2)
+    with cb1:
+        if vl_closing is not None:
+            st.info(f"📘 **{VL} Closing Balance:** {fmt_inr(vl_closing)}")
+        else:
+            st.info(f"📘 **{VL} Closing Balance:** Not detected in file")
+    with cb2:
+        if cl_closing is not None:
+            st.info(f"📗 **{CL} Closing Balance:** {fmt_inr(cl_closing)}")
+        else:
+            st.info(f"📗 **{CL} Closing Balance:** Not detected in file")
 
     with st.expander("👁 Preview Parsed Data"):
         pc1, pc2 = st.columns(2)
@@ -1642,6 +1663,7 @@ def main():
         results['vl_annotated'] = safe_records(results['vl_annotated'])
         results['cl_annotated'] = safe_records(results['cl_annotated'])
         results['vl_closing'] = float(vl_closing) if vl_closing is not None else None
+        results['cl_closing'] = float(cl_closing) if cl_closing is not None else None
         results['vl_name'] = VL
         results['cl_name'] = CL
         st.session_state['results'] = results
@@ -1655,6 +1677,7 @@ def main():
     vl_ann_df = pd.DataFrame(results['vl_annotated'])
     cl_ann_df  = pd.DataFrame(results['cl_annotated'])
     vl_closing_val = results.get('vl_closing')
+    cl_closing_val = results.get('cl_closing')
 
     # ── Compute values for summary ──
     cn_matched      = [r for r in results['dn_matched'] if 'Credit Note' in str(r.get('Match Type', ''))]
@@ -1825,53 +1848,56 @@ def main():
     # ── LEDGER RECONCILIATION STATEMENT (sample format from image) ──
     st.markdown("---")
     st.markdown("### 📋 Ledger Reconciliation Statement")
-    vl_bal = float(vl_closing_val) if vl_closing_val else 0.0
-    adj_inv_vl     = inv_un_vl_val       # Tax invoice in VL not in CL → Less
-    adj_cn_vl      = cn_matched_val      # Credit note in VL not in CL → Add
-    adj_dn_cl      = dn_un_cl_val        # Debit notes in CL not in VL → Less
-    adj_inv_cl     = inv_un_cl_val       # Invoice in CL not in VL → Add
-    adj_pay_vl     = col_un_vl_val       # Payment in VL not in CL → Add
-    adj_pay_cl     = col_un_cl_val       # Payment in CL not in VL → Less
-    net_bal_b      = vl_bal - adj_inv_vl + adj_cn_vl - adj_dn_cl + adj_inv_cl + adj_pay_vl - adj_pay_cl
-    cl_balance     = total_un_cl_val - total_un_vl_val  # Approximate
-    diff_bc        = net_bal_b - cl_balance
+    vl_bal     = float(vl_closing_val) if vl_closing_val else 0.0
+    cl_bal_act = float(cl_closing_val) if cl_closing_val else 0.0
+    adj_inv_vl = inv_un_vl_val
+    adj_cn_vl  = cn_matched_val
+    adj_dn_cl  = dn_un_cl_val
+    adj_inv_cl = inv_un_cl_val
+    adj_pay_vl = col_un_vl_val
+    adj_pay_cl = col_un_cl_val
+    net_bal_b  = vl_bal - adj_inv_vl + adj_cn_vl - adj_dn_cl + adj_inv_cl + adj_pay_vl - adj_pay_cl
+    # Use actual CL closing if available, else approximate
+    cl_balance = cl_bal_act if cl_bal_act != 0.0 else (total_un_cl_val - total_un_vl_val)
+    diff_bc    = net_bal_b - cl_balance
 
     recon_rows = [
-        ("Particular", "Amount", None),
+        ("Particular", "Amount", "col_header"),
         (f"Balance as per {VL} Books as on (A)", fmt_inr(vl_bal), "header"),
-        (f"Less: Tax invoice delivered but not available in {CL}", fmt_inr(-adj_inv_vl), "less"),
-        (f"Add: Credit note available in {VL} but not in {CL} books", fmt_inr(adj_cn_vl), "add"),
-        (f"Less: Debit notes available in {CL} but not in {VL}", fmt_inr(-adj_dn_cl), "less"),
-        (f"Add: Tax invoice delivered but not available in {VL}", fmt_inr(adj_inv_cl), "add"),
-        (f"Add: Payment not available in {CL}", fmt_inr(adj_pay_vl), "add"),
-        (f"Less: Payment not available in {VL}", fmt_inr(-adj_pay_cl), "less"),
-        ("", "", None),
+        (f"Less:  Tax invoice delivered but not available in {CL}", fmt_inr(-adj_inv_vl), "less"),
+        (f"Add:   Credit note available in {VL} but not in {CL} books", fmt_inr(adj_cn_vl), "add"),
+        (f"Less:  Debit notes available in {CL} but not in {VL}", fmt_inr(-adj_dn_cl), "less"),
+        (f"Add:   Tax invoice delivered but not available in {VL}", fmt_inr(adj_inv_cl), "add"),
+        (f"Add:   Payment not available in {CL}", fmt_inr(adj_pay_vl), "add"),
+        (f"Less:  Payment not available in {VL}", fmt_inr(-adj_pay_cl), "less"),
+        ("", "", "blank"),
         (f"Net Balance as per {VL} Books — B", fmt_inr(net_bal_b), "total"),
-        ("", "", None),
-        (f"Balance as per {CL} Books — C", fmt_inr(cl_balance), "total"),
-        ("", "", None),
+        ("", "", "blank"),
+        (f"Balance as per {CL} Books — C", fmt_inr(cl_balance), "cl_total"),
+        ("", "", "blank"),
         ("Unreconciled Difference B - C", fmt_inr(diff_bc), "diff"),
         ("(This value should be zero after all the adjustments)", "", "note"),
     ]
 
     rs1, rs2 = st.columns([3, 1])
     for label, amount, row_type in recon_rows:
-        if row_type == "header":
-            bg, fg = "#1a3a6b", "#ffffff"
-        elif row_type == "total":
-            bg, fg = "#2a2a2a", "#e8ecf4"
-        elif row_type == "diff":
-            bg, fg = "#cc0000", "#ffffff"
-        elif row_type == "note":
-            bg, fg = "#cc0000", "#ffffff"
-        elif label == "Particular":
-            bg, fg = "#1c2130", "#4f8eff"
-        else:
-            bg, fg = "#141720", "#e8ecf4"
+        styles = {
+            "col_header": ("#1c2130", "#4f8eff", True),
+            "header":     ("#1a3a6b", "#ffffff", True),
+            "less":       ("#1a1a2a", "#ff9999", False),
+            "add":        ("#1a2a1a", "#99ffcc", False),
+            "blank":      ("#0d0f14", "#0d0f14", False),
+            "total":      ("#1a3a6b", "#ffffff", True),
+            "cl_total":   ("#1a5a3a", "#ffffff", True),
+            "diff":       ("#cc0000", "#ffffff", True),
+            "note":       ("#cc0000", "#ffcccc", False),
+        }
+        bg, fg, bold = styles.get(row_type, ("#141720", "#e8ecf4", False))
+        fw = "700" if bold else "400"
         with rs1:
-            st.markdown(f"<div style='background:{bg};color:{fg};padding:6px 12px;border-bottom:1px solid #252c3d;font-size:0.82rem'>{label}</div>", unsafe_allow_html=True)
+            st.markdown(f"<div style='background:{bg};color:{fg};padding:7px 14px;border-bottom:1px solid #252c3d;font-size:0.83rem;font-weight:{fw}'>{label}</div>", unsafe_allow_html=True)
         with rs2:
-            st.markdown(f"<div style='background:{bg};color:{fg};padding:6px 12px;border-bottom:1px solid #252c3d;font-size:0.82rem;text-align:right'>{amount}</div>", unsafe_allow_html=True)
+            st.markdown(f"<div style='background:{bg};color:{fg};padding:7px 14px;border-bottom:1px solid #252c3d;font-size:0.83rem;font-weight:{fw};text-align:right'>{amount}</div>", unsafe_allow_html=True)
 
     # ── DOWNLOAD ──
     st.markdown("---")
