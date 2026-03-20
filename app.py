@@ -1482,10 +1482,10 @@ def main():
 
     # Summary rows: (label, vl_total, matched, vl_unmatched, cl_total, cl_unmatched, pct, tab_key, color)
     summary_rows_ui = [
-        ('🧾 Invoices',                        inv_vl,  len(results['invoice_matched']),   len(results['invoice_unmatched_vl']),   inv_cl,  len(results['invoice_unmatched_cl']),   f'{inv_pct}%',  'inv',       '#00d4aa'),
-        ('🟡 Credit Notes ↔ Discount DN / PRN', cn_vl,   len(cn_matched),                   cn_vl - len(cn_matched),                '-',     '-',                                    f'{cn_pct}%',   'dn',        '#4f8eff'),
-        ('📝 Debit Notes',                      dn_vl,   len(dn_only_matched),               len(results['dn_unmatched_vl']),        dn_cl,   len(results['dn_unmatched_cl']),        f'{dn_pct}%',   'dn',        '#00d4aa'),
-        ('💰 Collections',                      col_vl,  len(results['collection_matched']), len(results['collection_unmatched_vl']),col_cl,  len(results['collection_unmatched_cl']),f'{col_pct}%',  'col',       '#00d4aa'),
+        ('🧾 Invoices',                        inv_vl,  len(results['invoice_matched']),   len(results['invoice_unmatched_vl']),   inv_cl,  len(results['invoice_unmatched_cl']),   f'{inv_pct}%',  'inv',        '#00d4aa'),
+        ('🟡 Credit Notes ↔ Discount DN / PRN', cn_vl,   len(cn_matched),                   cn_vl - len(cn_matched),                '-',     '-',                                    f'{cn_pct}%',   'cn_match',   '#4f8eff'),
+        ('📝 Debit Notes',                      dn_vl,   len(dn_only_matched),               len(results['dn_unmatched_vl']),        dn_cl,   len(results['dn_unmatched_cl']),        f'{dn_pct}%',   'dn',         '#00d4aa'),
+        ('💰 Collections',                      col_vl,  len(results['collection_matched']), len(results['collection_unmatched_vl']),col_cl,  len(results['collection_unmatched_cl']),f'{col_pct}%',  'col',        '#00d4aa'),
         ('🔁 Reversed in VL — Also in CL',      total_cross_ledger, total_cross_ledger, 0,   total_cross_ledger, 0,                  '⚠️ Review', 'rev_cross', '#ff8c42'),
         ('🔄 Reversed in VL — Not in CL',       total_vl_internal*2, total_vl_internal, 0,  '-',     '-',                            '✅ OK',     'rev_int',   '#00d4aa'),
         ('❓ Reversal — Unmatched / Mismatch',   total_rev_unmatched, 0, total_rev_unmatched,'-',     '-',                            '❌ 0%',     'rev_un',    '#ff4d6d'),
