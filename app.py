@@ -420,6 +420,23 @@ def load_customer_ledger(file):
 # ─────────────────────────────────────────────
 
 def run_reconciliation(vl_orig, cl_orig, tolerance=1.0):
+    """
+    Matching logic:
+    STEP 1 — VL Reversal (Complete Reversal / Saleable Return) matched to VL original invoice
+             AND simultaneously check if that original invoice exists in CL.
+             → 3 sub-cases:
+               (a) VL reversal + VL original + CL invoice all present
+                   → VL original: "Reversed in VL - Also in CL" | VL reversal: "Reversal of VL Invoice"
+                   → CL invoice: "Invoice Reversed in VL" | separate annexure: cross_ledger_reversal
+               (b) VL reversal + VL original, but NOT in CL
+                   → Normal VL-only reversal pair
+               (c) VL reversal exists but original NOT found in VL
+                   → Reversal unmatched
+    STEP 2 — Match remaining VL invoices vs CL invoices by doc number
+    STEP 3 — Match debit notes by doc number, then period+amount
+    STEP 4 — Match collections by UTR, then period+amount
+    STEP 5 — All remaining → Unmatched
+    """
     results = {
         'invoice_matched': [],
         'invoice_unmatched_vl': [],
@@ -430,7 +447,11 @@ def run_reconciliation(vl_orig, cl_orig, tolerance=1.0):
         'collection_matched': [],
         'collection_unmatched_vl': [],
         'collection_unmatched_cl': [],
-        'reversal_matched': [],
+        # VL reversal matched to its own VL original (internal VL reversal)
+        'reversal_vl_internal': [],
+        # VL reversal where original invoice ALSO exists in CL (cross-ledger)
+        'reversal_cross_ledger': [],
+        # VL reversal with no original found
         'reversal_unmatched': [],
     }
 
@@ -439,63 +460,144 @@ def run_reconciliation(vl_orig, cl_orig, tolerance=1.0):
     vl['_matched'] = False
     cl['_matched'] = False
 
-    # ── STEP 1: Handle Reversal entries in Vendor Ledger ──
-    # These are rows with doc_type = Complete Reversal / Saleable Return
-    # They reference original invoice in the Particulars column
+    # ════════════════════════════════════════════════════
+    # STEP 1: Process VL Reversal entries
+    # Reversal doc types: Complete Reversal, Saleable Return etc.
+    # Original invoice number is mentioned in Particulars column
+    # ════════════════════════════════════════════════════
     vl_reversals = vl[vl['doc_type'].apply(is_reversal_type)].copy()
 
     for idx, rev_row in vl_reversals.iterrows():
-        ref = rev_row.get('particulars_ref', '')
-        doc_no = rev_row.get('doc_no_clean', '')
+        # Get referenced original invoice no from Particulars
+        ref_from_particulars = rev_row.get('particulars_ref', '')
+        rev_doc_no = rev_row.get('doc_no_clean', '')
 
-        # Find the original invoice in VL being reversed (by particulars ref or doc_no)
+        # Try multiple ways to find original invoice in VL:
+        # 1. particulars_ref matches a VL invoice doc_no
+        # 2. reversal doc_no itself matches a VL invoice doc_no
+        # 3. partial match — particulars contains part of a VL doc no
         orig_candidates = vl[
             (~vl['_matched']) &
             (~vl['doc_type'].apply(is_reversal_type)) &
             (~vl['doc_type'].apply(is_debit_note)) &
-            (~vl['doc_type'].apply(lambda x: is_collection(x))) &
-            ((vl['doc_no_clean'] == ref) | (vl['doc_no_clean'] == doc_no))
+            (~vl['doc_type'].apply(lambda x: is_collection(x)))
         ]
 
-        if not orig_candidates.empty:
-            orig_row = orig_candidates.iloc[0]
-            # Mark both the original and reversal as matched (reversed pair)
-            vl.at[orig_row['_idx'], '_matched'] = True
-            vl.at[orig_row['_idx'], '_remark'] = 'Matched - Reversed'
-            vl.at[orig_row['_idx'], '_match_ref'] = str(rev_row.get('doc_no', ''))
-            vl.at[idx, '_matched'] = True
-            vl.at[idx, '_remark'] = 'Matched - Reversal Entry'
-            vl.at[idx, '_match_ref'] = str(orig_row.get('doc_no', ''))
+        orig_match = None
+        match_basis_rev = ''
 
-            results['reversal_matched'].append({
-                'Original Doc No': orig_row.get('doc_no', ''),
-                'Original Date': orig_row.get('doc_date', ''),
-                'Original Type': orig_row.get('doc_type', ''),
-                'Original Debit': orig_row.get('debit', 0),
-                'Original Credit': orig_row.get('credit', 0),
-                'Reversal Doc No': rev_row.get('doc_no', ''),
-                'Reversal Date': rev_row.get('doc_date', ''),
-                'Reversal Type': rev_row.get('doc_type', ''),
-                'Reversal Debit': rev_row.get('debit', 0),
-                'Reversal Credit': rev_row.get('credit', 0),
-                'Particulars': rev_row.get('particulars', ''),
-                'Remark': 'Reversed & Reconciled',
-            })
+        # Try exact match on particulars_ref
+        if ref_from_particulars:
+            exact = orig_candidates[orig_candidates['doc_no_clean'] == ref_from_particulars]
+            if not exact.empty:
+                orig_match = exact.iloc[0]
+                match_basis_rev = 'Particulars Reference'
+
+        # Try matching reversal doc_no against VL originals
+        if orig_match is None and rev_doc_no:
+            exact2 = orig_candidates[orig_candidates['doc_no_clean'] == rev_doc_no]
+            if not exact2.empty:
+                orig_match = exact2.iloc[0]
+                match_basis_rev = 'Document Number'
+
+        # Try partial match — ref is substring of VL doc_no or vice versa
+        if orig_match is None and ref_from_particulars and len(ref_from_particulars) >= 4:
+            partial = orig_candidates[
+                orig_candidates['doc_no_clean'].str.contains(ref_from_particulars[:min(8, len(ref_from_particulars))], na=False)
+            ]
+            if not partial.empty:
+                orig_match = partial.iloc[0]
+                match_basis_rev = 'Partial Particulars Match'
+
+        if orig_match is not None:
+            orig_vl_idx = orig_match['_idx']
+            orig_doc_no = str(orig_match.get('doc_no', ''))
+
+            # Now check: does this original invoice ALSO exist in CL?
+            cl_match_candidates = cl[
+                (~cl['_matched']) &
+                (~cl['doc_type'].apply(is_debit_note)) &
+                (~cl['doc_type'].apply(lambda x: is_collection(x, '')))
+            ]
+            cl_for_orig = cl_match_candidates[
+                cl_match_candidates['doc_no_clean'] == orig_match['doc_no_clean']
+            ]
+
+            # Mark VL reversal row
+            vl.at[idx, '_matched'] = True
+            vl.at[idx, '_match_ref'] = orig_doc_no
+
+            # Mark VL original row
+            vl.at[orig_vl_idx, '_matched'] = True
+            vl.at[orig_vl_idx, '_match_ref'] = str(rev_row.get('doc_no', ''))
+
+            if not cl_for_orig.empty:
+                # ── CASE A: Invoice reversed in VL but ALSO present in CL ──
+                cl_row = cl_for_orig.iloc[0]
+                cl.at[cl_row['_idx'], '_matched'] = True
+                cl.at[cl_row['_idx'], '_remark'] = 'Invoice Reversed in VL - Present in CL'
+                cl.at[cl_row['_idx'], '_match_ref'] = str(rev_row.get('doc_no', ''))
+
+                vl.at[idx, '_remark'] = 'Reversal Entry - Invoice Also in CL'
+                vl.at[orig_vl_idx, '_remark'] = 'Reversed in VL - Invoice Also in CL'
+
+                results['reversal_cross_ledger'].append({
+                    'VL Original Doc No': orig_doc_no,
+                    'VL Original Date': orig_match.get('doc_date', ''),
+                    'VL Original Type': orig_match.get('doc_type', ''),
+                    'VL Original Debit': orig_match.get('debit', 0),
+                    'VL Original Credit': orig_match.get('credit', 0),
+                    'VL Reversal Doc No': str(rev_row.get('doc_no', '')),
+                    'VL Reversal Date': rev_row.get('doc_date', ''),
+                    'VL Reversal Type': rev_row.get('doc_type', ''),
+                    'VL Reversal Debit': rev_row.get('debit', 0),
+                    'VL Reversal Credit': rev_row.get('credit', 0),
+                    'VL Reversal Particulars': rev_row.get('particulars', ''),
+                    'CL Doc No': cl_row.get('doc_no', ''),
+                    'CL Date': cl_row.get('doc_date', ''),
+                    'CL Type': cl_row.get('doc_type', ''),
+                    'CL Debit': cl_row.get('debit', 0),
+                    'CL Credit': cl_row.get('credit', 0),
+                    'Match Basis': match_basis_rev,
+                    'Remark': 'Invoice Reversed in VL but Present in CL — Needs Review',
+                })
+            else:
+                # ── CASE B: Pure VL internal reversal — not in CL ──
+                vl.at[idx, '_remark'] = 'Reversal Entry - VL Internal'
+                vl.at[orig_vl_idx, '_remark'] = 'Reversed in VL - Not in CL'
+
+                results['reversal_vl_internal'].append({
+                    'VL Original Doc No': orig_doc_no,
+                    'VL Original Date': orig_match.get('doc_date', ''),
+                    'VL Original Type': orig_match.get('doc_type', ''),
+                    'VL Original Debit': orig_match.get('debit', 0),
+                    'VL Original Credit': orig_match.get('credit', 0),
+                    'VL Reversal Doc No': str(rev_row.get('doc_no', '')),
+                    'VL Reversal Date': rev_row.get('doc_date', ''),
+                    'VL Reversal Type': rev_row.get('doc_type', ''),
+                    'VL Reversal Debit': rev_row.get('debit', 0),
+                    'VL Reversal Credit': rev_row.get('credit', 0),
+                    'VL Reversal Particulars': rev_row.get('particulars', ''),
+                    'Match Basis': match_basis_rev,
+                    'Remark': 'Reversed in VL - Not Present in CL',
+                })
         else:
-            # Reversal with no matching original — mark as unmatched
-            vl.at[idx, '_matched'] = True  # exclude from further matching
-            vl.at[idx, '_remark'] = 'Unmatched - Reversal (No Original Found)'
+            # ── CASE C: Reversal entry with no original found ──
+            vl.at[idx, '_matched'] = True
+            vl.at[idx, '_remark'] = 'Reversal - Original Not Found in VL'
             results['reversal_unmatched'].append({
-                'Doc No': rev_row.get('doc_no', ''),
-                'Date': rev_row.get('doc_date', ''),
-                'Type': rev_row.get('doc_type', ''),
+                'VL Doc No': str(rev_row.get('doc_no', '')),
+                'VL Date': rev_row.get('doc_date', ''),
+                'VL Type': rev_row.get('doc_type', ''),
                 'Particulars': rev_row.get('particulars', ''),
                 'Debit': rev_row.get('debit', 0),
                 'Credit': rev_row.get('credit', 0),
-                'Remark': 'Reversal Entry - Original Not Found',
+                'Remark': 'Reversal Entry — Original Invoice Not Found in VL',
             })
 
-    # ── STEP 2: Match Invoices by Document Number ──
+    # ════════════════════════════════════════════════════
+    # STEP 2: Match Invoices by Document Number (VL vs CL)
+    # ════════════════════════════════════════════════════
     vl_inv = vl[
         (~vl['_matched']) &
         (~vl['doc_type'].apply(is_debit_note)) &
@@ -536,7 +638,9 @@ def run_reconciliation(vl_orig, cl_orig, tolerance=1.0):
                 'Remark': 'Matched',
             })
 
-    # ── STEP 3: Match Debit Notes ──
+    # ════════════════════════════════════════════════════
+    # STEP 3: Match Debit Notes
+    # ════════════════════════════════════════════════════
     vl_dn = vl[(~vl['_matched']) & (vl['doc_type'].apply(is_debit_note))].copy()
     cl_dn = cl[(~cl['_matched']) & (cl['doc_type'].apply(is_debit_note))].copy()
 
@@ -584,7 +688,9 @@ def run_reconciliation(vl_orig, cl_orig, tolerance=1.0):
                 'Remark': 'Matched',
             })
 
-    # ── STEP 4: Match Collections ──
+    # ════════════════════════════════════════════════════
+    # STEP 4: Match Collections by UTR or Period+Amount
+    # ════════════════════════════════════════════════════
     vl_col = vl[(~vl['_matched']) & (vl['doc_type'].apply(lambda x: is_collection(x, '')))].copy()
     cl_col = cl[(~cl['_matched']) & (cl['doc_type'].apply(lambda x: is_collection(x, '')))].copy()
 
@@ -637,11 +743,10 @@ def run_reconciliation(vl_orig, cl_orig, tolerance=1.0):
                 'Remark': 'Matched',
             })
 
-    # ── STEP 5: Mark remaining unmatched ──
-    unmatched_vl = vl[~vl['_matched']]
-    unmatched_cl = cl[~cl['_matched']]
-
-    for idx, r in unmatched_vl.iterrows():
+    # ════════════════════════════════════════════════════
+    # STEP 5: Mark all remaining rows as Unmatched
+    # ════════════════════════════════════════════════════
+    for idx, r in vl[~vl['_matched']].iterrows():
         vl.at[idx, '_remark'] = 'Unmatched'
         entry = {
             'Doc No': r.get('doc_no', ''),
@@ -660,7 +765,7 @@ def run_reconciliation(vl_orig, cl_orig, tolerance=1.0):
         else:
             results['invoice_unmatched_vl'].append(entry)
 
-    for idx, r in unmatched_cl.iterrows():
+    for idx, r in cl[~cl['_matched']].iterrows():
         cl.at[idx, '_remark'] = 'Unmatched'
         entry = {
             'Doc No': r.get('doc_no', ''),
@@ -678,7 +783,6 @@ def run_reconciliation(vl_orig, cl_orig, tolerance=1.0):
         else:
             results['invoice_unmatched_cl'].append(entry)
 
-    # Store annotated ledgers for the "Ledger with Remarks" sheets
     results['vl_annotated'] = vl
     results['cl_annotated'] = cl
 
@@ -794,9 +898,19 @@ def build_excel(results, vl_orig, cl_orig):
          dn_cl_total, len(results['dn_matched']), len(results['dn_unmatched_cl']), 'Matched by Doc No / Period+Amount'],
         ['Collections', col_vl_total, len(results['collection_matched']), len(results['collection_unmatched_vl']),
          col_cl_total, len(results['collection_matched']), len(results['collection_unmatched_cl']), 'Matched by UTR / Period+Amount'],
-        ['Reversals (VL)', len(results['reversal_matched']) * 2 + len(results['reversal_unmatched']),
-         len(results['reversal_matched']), len(results['reversal_unmatched']),
-         '-', '-', '-', 'Complete Reversal / Saleable Return'],
+        ['Reversals - Cross Ledger (VL reversed + in CL)',
+         len(results['reversal_cross_ledger']),
+         len(results['reversal_cross_ledger']), 0,
+         len(results['reversal_cross_ledger']), len(results['reversal_cross_ledger']), 0,
+         'Invoice Reversed in VL but Present in CL'],
+        ['Reversals - VL Internal (not in CL)',
+         len(results['reversal_vl_internal']) * 2,
+         len(results['reversal_vl_internal']), 0,
+         '-', '-', '-', 'Reversed in VL Only - No CL Impact'],
+        ['Reversals - Original Not Found',
+         len(results['reversal_unmatched']), 0,
+         len(results['reversal_unmatched']),
+         '-', '-', '-', 'Reversal entry without matching original'],
     ]
 
     row_colors = ['FFFFFF', 'F8F9FB', 'FFFFFF', 'FFF9E6']
@@ -958,8 +1072,9 @@ def build_excel(results, vl_orig, cl_orig):
     write_sheet('Collections - Matched', results['collection_matched'], '1A6B45')
     write_sheet('Collections - Unmatch VL', results['collection_unmatched_vl'], 'A32035')
     write_sheet('Collections - Unmatch CL', results['collection_unmatched_cl'], 'A32035')
-    write_sheet('Reversals - Matched', results['reversal_matched'], 'B85C00')
-    write_sheet('Reversals - Unmatched', results['reversal_unmatched'], 'A32035')
+    write_sheet('Reversal - Cross Ledger', results['reversal_cross_ledger'], 'B85C00')
+    write_sheet('Reversal - VL Internal', results['reversal_vl_internal'], '7B5EA7')
+    write_sheet('Reversal - Unmatched', results['reversal_unmatched'], 'A32035')
 
     wb.save(output)
     return output.getvalue()
@@ -1084,7 +1199,9 @@ def main():
     total_matched = len(results['invoice_matched']) + len(results['dn_matched']) + len(results['collection_matched'])
     total_unmatched_vl = len(results['invoice_unmatched_vl']) + len(results['dn_unmatched_vl']) + len(results['collection_unmatched_vl'])
     total_unmatched_cl = len(results['invoice_unmatched_cl']) + len(results['dn_unmatched_cl']) + len(results['collection_unmatched_cl'])
-    total_reversals = len(results['reversal_matched'])
+    total_cross_ledger = len(results['reversal_cross_ledger'])
+    total_vl_internal = len(results['reversal_vl_internal'])
+    total_rev_unmatched = len(results['reversal_unmatched'])
 
     st.markdown(f"""
     <div class="stat-grid">
@@ -1099,9 +1216,9 @@ def main():
             <div class="stat-sub">CL Unmatched: {total_unmatched_cl}</div>
         </div>
         <div class="stat-card partial">
-            <div class="stat-label">Reversals Reconciled</div>
-            <div class="stat-value">{total_reversals}</div>
-            <div class="stat-sub">Complete Reversal / Saleable Return</div>
+            <div class="stat-label">Reversed in VL + in CL</div>
+            <div class="stat-value">{total_cross_ledger}</div>
+            <div class="stat-sub">VL Internal: {total_vl_internal}</div>
         </div>
         <div class="stat-card total">
             <div class="stat-label">Invoice Matches</div>
@@ -1167,13 +1284,31 @@ def main():
                 <td class="num matched-val">{col_pct}%</td>
             </tr>
             <tr>
-                <td>🔁 Reversals</td>
-                <td class="num">{len(results['reversal_matched']) * 2 + len(results['reversal_unmatched'])}</td>
-                <td class="num matched-val">{len(results['reversal_matched'])}</td>
-                <td class="num unmatched-val">{len(results['reversal_unmatched'])}</td>
+                <td>🔁 Reversed in VL — Also in CL</td>
+                <td class="num">{total_cross_ledger}</td>
+                <td class="num matched-val">{total_cross_ledger}</td>
+                <td class="num">—</td>
+                <td class="num">{total_cross_ledger}</td>
+                <td class="num">—</td>
+                <td class="num" style="color:#ff8c42;">⚠️ Review</td>
+            </tr>
+            <tr>
+                <td>🔄 Reversed in VL — Not in CL</td>
+                <td class="num">{total_vl_internal * 2}</td>
+                <td class="num matched-val">{total_vl_internal}</td>
                 <td class="num">—</td>
                 <td class="num">—</td>
                 <td class="num">—</td>
+                <td class="num matched-val">100%</td>
+            </tr>
+            <tr>
+                <td>❓ Reversal — Original Not Found</td>
+                <td class="num">{total_rev_unmatched}</td>
+                <td class="num">0</td>
+                <td class="num unmatched-val">{total_rev_unmatched}</td>
+                <td class="num">—</td>
+                <td class="num">—</td>
+                <td class="num unmatched-val">0%</td>
             </tr>
             <tr class="total-row">
                 <td><b>TOTAL</b></td>
@@ -1242,11 +1377,24 @@ def main():
             display_df(results['collection_unmatched_cl'])
 
     with tabs[3]:
-        st.markdown('<span class="section-tag tag-partial">REVERSALS RECONCILED (Complete Reversal / Saleable Return)</span>', unsafe_allow_html=True)
-        st.caption("Reversal invoices matched to their original invoice via the Particulars column.")
-        display_df(results['reversal_matched'])
+        # ── Sub-category A: Reversed in VL AND present in CL ──
+        st.markdown('<span class="section-tag tag-partial">⚠️ REVERSED IN VL — INVOICE ALSO IN CUSTOMER LEDGER</span>', unsafe_allow_html=True)
+        st.caption("These invoices were reversed in the Vendor Ledger but the original invoice also exists in the Customer Ledger. This needs review — the customer may not be aware of the reversal.")
+        display_df(results['reversal_cross_ledger'])
+
+        st.markdown("---")
+
+        # ── Sub-category B: Pure VL internal reversal ──
+        st.markdown('<span class="section-tag tag-matched">✅ REVERSED IN VL — NOT IN CUSTOMER LEDGER</span>', unsafe_allow_html=True)
+        st.caption("Original invoice and its reversal both exist only in Vendor Ledger. Not present in Customer Ledger — no cross-ledger impact.")
+        display_df(results['reversal_vl_internal'])
+
+        st.markdown("---")
+
+        # ── Sub-category C: Reversal with no original found ──
         if results['reversal_unmatched']:
-            st.markdown('<span class="section-tag tag-unmatched">REVERSALS — ORIGINAL NOT FOUND</span>', unsafe_allow_html=True)
+            st.markdown('<span class="section-tag tag-unmatched">❓ REVERSAL ENTRIES — ORIGINAL NOT FOUND IN VL</span>', unsafe_allow_html=True)
+            st.caption("Reversal entries for which the original invoice could not be located in the Vendor Ledger.")
             display_df(results['reversal_unmatched'])
 
     with tabs[4]:
