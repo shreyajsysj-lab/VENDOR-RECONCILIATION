@@ -279,13 +279,14 @@ def is_debit_note(doc_type):
     return any(k in s for k in ['DEBIT NOTE', 'DN', 'DEBIT MEMO', 'DM', 'CREDIT MEMO', 'CM'])
 
 def is_reversal_type(doc_type):
-    """Detect Complete Reversal or Saleable Return doc types."""
+    """Detect Complete Reversal, Saleable Return and similar doc types."""
     if pd.isna(doc_type):
         return False
     s = str(doc_type).upper()
     return any(k in s for k in [
         'COMPLETE REVERSAL', 'REVERSAL', 'SALEABLE RETURN',
-        'SALES RETURN', 'RETURN', 'CANCELLATION', 'CANCEL', 'REVERSED'
+        'SALES RETURN', 'SALE RETURN', 'RETURN', 'CANCELLATION',
+        'CANCEL', 'REVERSED', 'CREDIT NOTE', 'CN', 'VOID', 'VOIDED'
     ])
 
 def is_collection(doc_type, particulars=""):
@@ -421,20 +422,19 @@ def load_customer_ledger(file):
 
 def run_reconciliation(vl_orig, cl_orig, tolerance=1.0):
     """
-    Matching logic:
-    STEP 1 — VL Reversal (Complete Reversal / Saleable Return) matched to VL original invoice
-             AND simultaneously check if that original invoice exists in CL.
-             → 3 sub-cases:
-               (a) VL reversal + VL original + CL invoice all present
-                   → VL original: "Reversed in VL - Also in CL" | VL reversal: "Reversal of VL Invoice"
-                   → CL invoice: "Invoice Reversed in VL" | separate annexure: cross_ledger_reversal
-               (b) VL reversal + VL original, but NOT in CL
-                   → Normal VL-only reversal pair
-               (c) VL reversal exists but original NOT found in VL
-                   → Reversal unmatched
+    STEP 1 — Identify ALL reversal rows in VL (Complete Reversal, Saleable Return, etc.)
+             Extract original invoice no. from Particulars column.
+             Match original invoice in VL by doc no AND validate amount is same/close.
+             Sub-cases:
+               (A) VL reversal ↔ VL original found (amount matches) + original ALSO in CL
+                   → Remark: 'Invoice Reversed in VL | Present in CL - Needs Review'
+               (B) VL reversal ↔ VL original found (amount matches) + NOT in CL
+                   → Remark: 'Invoice Reversed in VL | Not in CL'
+               (C) VL reversal found but NO original in VL (or amount mismatch)
+                   → Remark: 'Reversal Entry - Original Not Found / Amount Mismatch'
     STEP 2 — Match remaining VL invoices vs CL invoices by doc number
-    STEP 3 — Match debit notes by doc number, then period+amount
-    STEP 4 — Match collections by UTR, then period+amount
+    STEP 3 — Match debit notes by doc number → period+amount
+    STEP 4 — Match collections by UTR → period+amount
     STEP 5 — All remaining → Unmatched
     """
     results = {
@@ -447,12 +447,9 @@ def run_reconciliation(vl_orig, cl_orig, tolerance=1.0):
         'collection_matched': [],
         'collection_unmatched_vl': [],
         'collection_unmatched_cl': [],
-        # VL reversal matched to its own VL original (internal VL reversal)
-        'reversal_vl_internal': [],
-        # VL reversal where original invoice ALSO exists in CL (cross-ledger)
-        'reversal_cross_ledger': [],
-        # VL reversal with no original found
-        'reversal_unmatched': [],
+        'reversal_vl_internal': [],       # Case B: Reversed in VL only
+        'reversal_cross_ledger': [],      # Case A: Reversed in VL but present in CL
+        'reversal_unmatched': [],         # Case C: No original found / amount mismatch
     }
 
     vl = vl_orig.copy()
@@ -461,67 +458,91 @@ def run_reconciliation(vl_orig, cl_orig, tolerance=1.0):
     cl['_matched'] = False
 
     # ════════════════════════════════════════════════════
-    # STEP 1: Process VL Reversal entries
-    # Reversal doc types: Complete Reversal, Saleable Return etc.
-    # Original invoice number is mentioned in Particulars column
+    # STEP 1: Process ALL VL Reversal entries
+    # Detect by doc_type keywords — broad detection
     # ════════════════════════════════════════════════════
     vl_reversals = vl[vl['doc_type'].apply(is_reversal_type)].copy()
 
-    for idx, rev_row in vl_reversals.iterrows():
-        # Get referenced original invoice no from Particulars
-        ref_from_particulars = rev_row.get('particulars_ref', '')
-        rev_doc_no = rev_row.get('doc_no_clean', '')
-
-        # Try multiple ways to find original invoice in VL:
-        # 1. particulars_ref matches a VL invoice doc_no
-        # 2. reversal doc_no itself matches a VL invoice doc_no
-        # 3. partial match — particulars contains part of a VL doc no
-        orig_candidates = vl[
-            (~vl['_matched']) &
-            (~vl['doc_type'].apply(is_reversal_type)) &
-            (~vl['doc_type'].apply(is_debit_note)) &
-            (~vl['doc_type'].apply(lambda x: is_collection(x)))
+    # Pool of VL invoices available for matching (non-reversal, non-DN, non-collection)
+    def get_vl_invoice_pool(vl_df):
+        return vl_df[
+            (~vl_df['_matched']) &
+            (~vl_df['doc_type'].apply(is_reversal_type)) &
+            (~vl_df['doc_type'].apply(is_debit_note)) &
+            (~vl_df['doc_type'].apply(lambda x: is_collection(x)))
         ]
 
-        orig_match = None
+    for idx, rev_row in vl_reversals.iterrows():
+        ref_particulars = rev_row.get('particulars_ref', '')   # cleaned ref from Particulars
+        raw_particulars = str(rev_row.get('particulars', ''))  # raw Particulars text
+        rev_doc_no      = rev_row.get('doc_no_clean', '')
+        rev_amount      = round_amount(rev_row.get('debit', 0) + rev_row.get('credit', 0))
+        rev_credit      = round_amount(rev_row.get('credit', 0))
+        rev_debit       = round_amount(rev_row.get('debit', 0))
+
+        orig_pool = get_vl_invoice_pool(vl)
+        orig_match     = None
         match_basis_rev = ''
 
-        # Try exact match on particulars_ref
-        if ref_from_particulars:
-            exact = orig_candidates[orig_candidates['doc_no_clean'] == ref_from_particulars]
-            if not exact.empty:
-                orig_match = exact.iloc[0]
-                match_basis_rev = 'Particulars Reference'
+        # ── Method 1: Exact match on cleaned particulars ref ──
+        if ref_particulars:
+            m = orig_pool[orig_pool['doc_no_clean'] == ref_particulars]
+            if not m.empty:
+                orig_match = m.iloc[0]
+                match_basis_rev = 'Particulars Reference (Exact)'
 
-        # Try matching reversal doc_no against VL originals
-        if orig_match is None and rev_doc_no:
-            exact2 = orig_candidates[orig_candidates['doc_no_clean'] == rev_doc_no]
-            if not exact2.empty:
-                orig_match = exact2.iloc[0]
-                match_basis_rev = 'Document Number'
+        # ── Method 2: Scan all words in raw Particulars against VL doc nos ──
+        if orig_match is None:
+            words = re.findall(r'[A-Z0-9]{4,}', raw_particulars.upper())
+            for word in words:
+                m = orig_pool[orig_pool['doc_no_clean'] == word]
+                if not m.empty:
+                    orig_match = m.iloc[0]
+                    match_basis_rev = f'Particulars Word Match ({word})'
+                    break
 
-        # Try partial match — ref is substring of VL doc_no or vice versa
-        if orig_match is None and ref_from_particulars and len(ref_from_particulars) >= 4:
-            partial = orig_candidates[
-                orig_candidates['doc_no_clean'].str.contains(ref_from_particulars[:min(8, len(ref_from_particulars))], na=False)
+        # ── Method 3: Partial substring match (first 8 chars of ref) ──
+        if orig_match is None and ref_particulars and len(ref_particulars) >= 5:
+            prefix = ref_particulars[:8]
+            m = orig_pool[orig_pool['doc_no_clean'].str.startswith(prefix, na=False)]
+            if not m.empty:
+                orig_match = m.iloc[0]
+                match_basis_rev = 'Particulars Partial Match'
+
+        # ── Method 4: Same period + same amount (fallback) ──
+        if orig_match is None and rev_amount > 0:
+            m = orig_pool[
+                (orig_pool['period'] == rev_row.get('period', '')) &
+                (abs(orig_pool['debit'] + orig_pool['credit'] - rev_amount) <= tolerance)
             ]
-            if not partial.empty:
-                orig_match = partial.iloc[0]
-                match_basis_rev = 'Partial Particulars Match'
+            if not m.empty:
+                orig_match = m.iloc[0]
+                match_basis_rev = 'Period + Amount Match'
 
+        # ── Amount Validation: reversal amount must match original ──
+        amount_valid = False
         if orig_match is not None:
+            orig_amount = round_amount(orig_match.get('debit', 0) + orig_match.get('credit', 0))
+            orig_credit = round_amount(orig_match.get('credit', 0))
+            orig_debit  = round_amount(orig_match.get('debit', 0))
+            # Accept if total amount, or credit/debit individually are within tolerance
+            if (abs(rev_amount - orig_amount) <= tolerance or
+                abs(rev_credit - orig_debit) <= tolerance or
+                abs(rev_debit - orig_credit) <= tolerance):
+                amount_valid = True
+
+        if orig_match is not None and amount_valid:
             orig_vl_idx = orig_match['_idx']
             orig_doc_no = str(orig_match.get('doc_no', ''))
+            orig_amount_val = round_amount(orig_match.get('debit', 0) + orig_match.get('credit', 0))
 
-            # Now check: does this original invoice ALSO exist in CL?
-            cl_match_candidates = cl[
+            # Check if original invoice also exists in CL
+            cl_pool = cl[
                 (~cl['_matched']) &
                 (~cl['doc_type'].apply(is_debit_note)) &
                 (~cl['doc_type'].apply(lambda x: is_collection(x, '')))
             ]
-            cl_for_orig = cl_match_candidates[
-                cl_match_candidates['doc_no_clean'] == orig_match['doc_no_clean']
-            ]
+            cl_for_orig = cl_pool[cl_pool['doc_no_clean'] == orig_match['doc_no_clean']]
 
             # Mark VL reversal row
             vl.at[idx, '_matched'] = True
@@ -535,11 +556,11 @@ def run_reconciliation(vl_orig, cl_orig, tolerance=1.0):
                 # ── CASE A: Invoice reversed in VL but ALSO present in CL ──
                 cl_row = cl_for_orig.iloc[0]
                 cl.at[cl_row['_idx'], '_matched'] = True
-                cl.at[cl_row['_idx'], '_remark'] = 'Invoice Reversed in VL - Present in CL'
-                cl.at[cl_row['_idx'], '_match_ref'] = str(rev_row.get('doc_no', ''))
+                cl.at[cl_row['_idx'], '_remark'] = 'Invoice Reversed in VL | Present in CL - Needs Review'
+                cl.at[cl_row['_idx'], '_match_ref'] = orig_doc_no
 
-                vl.at[idx, '_remark'] = 'Reversal Entry - Invoice Also in CL'
-                vl.at[orig_vl_idx, '_remark'] = 'Reversed in VL - Invoice Also in CL'
+                vl.at[idx, '_remark'] = f'Reversal Entry | Original: {orig_doc_no} | Invoice Also in CL'
+                vl.at[orig_vl_idx, '_remark'] = f'Invoice Reversed in VL | Reversal: {str(rev_row.get("doc_no",""))} | Also in CL'
 
                 results['reversal_cross_ledger'].append({
                     'VL Original Doc No': orig_doc_no,
@@ -552,19 +573,20 @@ def run_reconciliation(vl_orig, cl_orig, tolerance=1.0):
                     'VL Reversal Type': rev_row.get('doc_type', ''),
                     'VL Reversal Debit': rev_row.get('debit', 0),
                     'VL Reversal Credit': rev_row.get('credit', 0),
-                    'VL Reversal Particulars': rev_row.get('particulars', ''),
+                    'VL Reversal Particulars': raw_particulars,
                     'CL Doc No': cl_row.get('doc_no', ''),
                     'CL Date': cl_row.get('doc_date', ''),
                     'CL Type': cl_row.get('doc_type', ''),
                     'CL Debit': cl_row.get('debit', 0),
                     'CL Credit': cl_row.get('credit', 0),
                     'Match Basis': match_basis_rev,
+                    'Amount Match': f'VL={rev_amount} | Orig={orig_amount_val}',
                     'Remark': 'Invoice Reversed in VL but Present in CL — Needs Review',
                 })
             else:
                 # ── CASE B: Pure VL internal reversal — not in CL ──
-                vl.at[idx, '_remark'] = 'Reversal Entry - VL Internal'
-                vl.at[orig_vl_idx, '_remark'] = 'Reversed in VL - Not in CL'
+                vl.at[idx, '_remark'] = f'Reversal Entry | Original: {orig_doc_no} | Not in CL'
+                vl.at[orig_vl_idx, '_remark'] = f'Invoice Reversed in VL | Reversal: {str(rev_row.get("doc_no",""))} | Not in CL'
 
                 results['reversal_vl_internal'].append({
                     'VL Original Doc No': orig_doc_no,
@@ -577,22 +599,30 @@ def run_reconciliation(vl_orig, cl_orig, tolerance=1.0):
                     'VL Reversal Type': rev_row.get('doc_type', ''),
                     'VL Reversal Debit': rev_row.get('debit', 0),
                     'VL Reversal Credit': rev_row.get('credit', 0),
-                    'VL Reversal Particulars': rev_row.get('particulars', ''),
+                    'VL Reversal Particulars': raw_particulars,
                     'Match Basis': match_basis_rev,
-                    'Remark': 'Reversed in VL - Not Present in CL',
+                    'Amount Match': f'VL={rev_amount} | Orig={orig_amount_val}',
+                    'Remark': 'Invoice Reversed in VL — Not Present in CL',
                 })
         else:
-            # ── CASE C: Reversal entry with no original found ──
+            # ── CASE C: No original found OR amount mismatch ──
+            reason = 'Original Invoice Not Found in VL'
+            if orig_match is not None and not amount_valid:
+                orig_amt_str = round_amount(orig_match.get('debit', 0) + orig_match.get('credit', 0))
+                reason = f'Amount Mismatch (Reversal={rev_amount} | Found Orig={orig_amt_str})'
+
             vl.at[idx, '_matched'] = True
-            vl.at[idx, '_remark'] = 'Reversal - Original Not Found in VL'
+            vl.at[idx, '_remark'] = f'Reversal Entry - {reason}'
+
             results['reversal_unmatched'].append({
                 'VL Doc No': str(rev_row.get('doc_no', '')),
                 'VL Date': rev_row.get('doc_date', ''),
                 'VL Type': rev_row.get('doc_type', ''),
-                'Particulars': rev_row.get('particulars', ''),
+                'Particulars': raw_particulars,
                 'Debit': rev_row.get('debit', 0),
                 'Credit': rev_row.get('credit', 0),
-                'Remark': 'Reversal Entry — Original Invoice Not Found in VL',
+                'Reason': reason,
+                'Remark': f'Reversal Entry — {reason}',
             })
 
     # ════════════════════════════════════════════════════
@@ -616,10 +646,10 @@ def run_reconciliation(vl_orig, cl_orig, tolerance=1.0):
         if not matches.empty:
             crow = matches.iloc[0]
             vl.at[idx, '_matched'] = True
-            vl.at[idx, '_remark'] = 'Matched'
+            vl.at[idx, '_remark'] = f'Matched | CL Doc: {str(crow.get("doc_no",""))}'
             vl.at[idx, '_match_ref'] = str(crow.get('doc_no', ''))
             cl.at[crow['_idx'], '_matched'] = True
-            cl.at[crow['_idx'], '_remark'] = 'Matched'
+            cl.at[crow['_idx'], '_remark'] = f'Matched | VL Doc: {str(vrow.get("doc_no",""))}'
             cl.at[crow['_idx'], '_match_ref'] = str(vrow.get('doc_no', ''))
             cl_inv.at[crow.name, '_matched'] = True
             results['invoice_matched'].append({
@@ -635,7 +665,7 @@ def run_reconciliation(vl_orig, cl_orig, tolerance=1.0):
                 'CL Credit': crow.get('credit', 0),
                 'Match Basis': 'Document Number',
                 'Match Type': 'Invoice',
-                'Remark': 'Matched',
+                'Remark': 'Matched - Invoice',
             })
 
     # ════════════════════════════════════════════════════
@@ -666,10 +696,10 @@ def run_reconciliation(vl_orig, cl_orig, tolerance=1.0):
 
         if matched:
             vl.at[idx, '_matched'] = True
-            vl.at[idx, '_remark'] = 'Matched'
+            vl.at[idx, '_remark'] = f'Matched - Debit Note | CL Doc: {str(crow.get("doc_no",""))}'
             vl.at[idx, '_match_ref'] = str(crow.get('doc_no', ''))
             cl.at[crow['_idx'], '_matched'] = True
-            cl.at[crow['_idx'], '_remark'] = 'Matched'
+            cl.at[crow['_idx'], '_remark'] = f'Matched - Debit Note | VL Doc: {str(vrow.get("doc_no",""))}'
             cl.at[crow['_idx'], '_match_ref'] = str(vrow.get('doc_no', ''))
             cl_dn.at[crow.name, '_matched'] = True
             results['dn_matched'].append({
@@ -685,7 +715,7 @@ def run_reconciliation(vl_orig, cl_orig, tolerance=1.0):
                 'CL Credit': crow.get('credit', 0),
                 'Match Basis': basis,
                 'Match Type': 'Debit Note',
-                'Remark': 'Matched',
+                'Remark': f'Matched - Debit Note ({basis})',
             })
 
     # ════════════════════════════════════════════════════
@@ -721,10 +751,10 @@ def run_reconciliation(vl_orig, cl_orig, tolerance=1.0):
 
         if matched:
             vl.at[idx, '_matched'] = True
-            vl.at[idx, '_remark'] = 'Matched'
+            vl.at[idx, '_remark'] = f'Matched - Collection ({basis}) | CL Doc: {str(crow.get("doc_no",""))}'
             vl.at[idx, '_match_ref'] = str(crow.get('doc_no', ''))
             cl.at[crow['_idx'], '_matched'] = True
-            cl.at[crow['_idx'], '_remark'] = 'Matched'
+            cl.at[crow['_idx'], '_remark'] = f'Matched - Collection ({basis}) | VL Doc: {str(vrow.get("doc_no",""))}'
             cl.at[crow['_idx'], '_match_ref'] = str(vrow.get('doc_no', ''))
             cl_col.at[crow.name, '_matched'] = True
             results['collection_matched'].append({
@@ -740,7 +770,7 @@ def run_reconciliation(vl_orig, cl_orig, tolerance=1.0):
                 'CL UTR': crow.get('utr', ''),
                 'Match Basis': basis,
                 'Match Type': 'Collection',
-                'Remark': 'Matched',
+                'Remark': f'Matched - Collection ({basis})',
             })
 
     # ════════════════════════════════════════════════════
@@ -756,7 +786,7 @@ def run_reconciliation(vl_orig, cl_orig, tolerance=1.0):
             'Debit': r.get('debit', 0),
             'Credit': r.get('credit', 0),
             'Source': 'Vendor Ledger',
-            'Remark': 'Unmatched',
+            'Remark': 'Unmatched — No corresponding entry found in Customer Ledger',
         }
         if is_debit_note(r.get('doc_type', '')):
             results['dn_unmatched_vl'].append(entry)
@@ -774,7 +804,7 @@ def run_reconciliation(vl_orig, cl_orig, tolerance=1.0):
             'Debit': r.get('debit', 0),
             'Credit': r.get('credit', 0),
             'Source': 'Customer Ledger',
-            'Remark': 'Unmatched',
+            'Remark': 'Unmatched — No corresponding entry found in Vendor Ledger',
         }
         if is_debit_note(r.get('doc_type', '')):
             results['dn_unmatched_cl'].append(entry)
