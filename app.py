@@ -452,6 +452,8 @@ def load_customer_ledger(file):
             col_map[c] = 'debit'
         elif 'credit' in cl:
             col_map[c] = 'credit'
+        elif 'closing' in cl or 'balance' in cl:
+            col_map[c] = 'closing'
     df = df.rename(columns=col_map)
 
     needed = ['doc_date', 'doc_no', 'doc_type', 'debit', 'credit']
@@ -460,22 +462,31 @@ def load_customer_ledger(file):
             df[col] = np.nan
 
     df['doc_date'] = pd.to_datetime(df['doc_date'], errors='coerce', dayfirst=True)
-    df['debit'] = pd.to_numeric(df['debit'], errors='coerce').fillna(0)
+    df['debit']  = pd.to_numeric(df['debit'],  errors='coerce').fillna(0)
     df['credit'] = pd.to_numeric(df['credit'], errors='coerce').fillna(0)
 
-    # Try to detect closing balance column in CL
-    closing_cols = [c for c in df.columns if any(k in c.lower() for k in ['closing','balance'])]
-    if closing_cols:
-        df['closing'] = pd.to_numeric(df[closing_cols[0]], errors='coerce')
+    # ── Capture closing balance BEFORE filtering rows ──
+    # Priority 1: closing balance column in the file (last non-null value)
+    if 'closing' in df.columns:
+        df['closing'] = pd.to_numeric(df['closing'], errors='coerce')
+        _cl_closing_from_col = df['closing'].dropna().iloc[-1] if not df['closing'].dropna().empty else None
     else:
-        df['closing'] = np.nan
+        _cl_closing_from_col = None
 
+    # Priority 2: Sum of all Credit rows minus Sum of all Debit rows (Cr - Dr)
+    _cl_closing_formula = df['credit'].sum() - df['debit'].sum()
+
+    # Store on the dataframe as metadata attribute (Python allows this)
     df['doc_no_clean'] = df['doc_no'].apply(clean_doc_number)
     df['period'] = df['doc_date'].apply(get_period)
     df = df[df['doc_no_clean'] != ''].reset_index(drop=True)
     df['_idx'] = df.index
     df['_remark'] = ''
     df['_match_ref'] = ''
+
+    # Attach closing balance as a special column so main() can read it
+    # Use the closing column value if present, else formula
+    df['_cl_closing'] = _cl_closing_from_col if _cl_closing_from_col is not None else _cl_closing_formula
     return df
 
 # ─────────────────────────────────────────────
@@ -1619,12 +1630,15 @@ def main():
             return
 
     # Closing balances
-    # VL: from closing balance column in the file
+    # VL: from closing balance column in the file (last non-null value)
     vl_closing = vl['closing'].dropna().iloc[-1] if 'closing' in vl.columns and not vl['closing'].dropna().empty else None
 
-    # CL: always use formula Credit (Cr) - Debit (Dr) as instructed
-    # This gives the correct payable/receivable balance from customer's perspective
-    if 'credit' in cl.columns and 'debit' in cl.columns:
+    # CL: read from _cl_closing column set during parsing
+    # This captures the closing balance BEFORE row filtering, using file column if present,
+    # otherwise formula: Credit (Cr) - Debit (Dr)
+    if '_cl_closing' in cl.columns and not cl['_cl_closing'].dropna().empty:
+        cl_closing = cl['_cl_closing'].iloc[0]  # same value on every row
+    elif 'credit' in cl.columns and 'debit' in cl.columns:
         cl_closing = cl['credit'].sum() - cl['debit'].sum()
     else:
         cl_closing = None
@@ -1640,9 +1654,12 @@ def main():
             st.info(f"📘 **{VL} Closing Balance:** Not detected in file")
     with cb2:
         if cl_closing is not None:
-            st.info(f"📗 **{CL} Closing Balance:** {fmt_inr(cl_closing)}")
+            # Detect which method was used
+            has_col = '_cl_closing' in cl.columns and not cl['_cl_closing'].dropna().empty
+            method  = "from file column" if has_col else "formula: Total Cr − Total Dr"
+            st.info(f"📗 **{CL} Closing Balance:** {fmt_inr(cl_closing)}  *(calculated {method})*")
         else:
-            st.info(f"📗 **{CL} Closing Balance:** Not detected in file")
+            st.info(f"📗 **{CL} Closing Balance:** Not detected")
 
     with st.expander("👁 Preview Parsed Data"):
         pc1, pc2 = st.columns(2)
