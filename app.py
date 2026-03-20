@@ -12,10 +12,15 @@ from openpyxl.utils import get_column_letter
 # PAGE CONFIG
 # ─────────────────────────────────────────────
 st.set_page_config(
-    page_title="VendorSync · Reconciliation",
+    page_title="Ledger Reconciliation",
     page_icon="⚖️",
     layout="wide",
     initial_sidebar_state="expanded",
+    menu_items={
+        'Get Help': None,
+        'Report a bug': None,
+        'About': None,
+    }
 )
 
 # ─────────────────────────────────────────────
@@ -24,6 +29,15 @@ st.set_page_config(
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Mono:wght@300;400;500&display=swap');
+
+/* ── Hide Streamlit chrome ── */
+#MainMenu {visibility: hidden !important;}
+footer {visibility: hidden !important;}
+header {visibility: hidden !important;}
+[data-testid="stToolbar"] {display: none !important;}
+[data-testid="stDecoration"] {display: none !important;}
+.viewerBadge_container__1QSob {display: none !important;}
+.stDeployButton {display: none !important;}
 
 :root {
     --bg: #0d0f14;
@@ -42,6 +56,13 @@ st.markdown("""
     --unmatched-border: #ff4d6d55;
     --partial: #ff8c4222;
     --partial-border: #ff8c4255;
+    /* Vendor = blue tone, Customer = teal tone */
+    --vl-color: #4f8eff;
+    --vl-bg: #4f8eff18;
+    --vl-border: #4f8eff44;
+    --cl-color: #00d4aa;
+    --cl-bg: #00d4aa18;
+    --cl-border: #00d4aa44;
 }
 
 html, body, [class*="css"] {
@@ -205,6 +226,8 @@ html, body, [class*="css"] {
 .tag-unmatched { background: var(--unmatched); color: var(--danger); border: 1px solid var(--unmatched-border); }
 .tag-partial { background: var(--partial); color: var(--warn); border: 1px solid var(--partial-border); }
 .tag-blue { background: #4f8eff22; color: var(--accent); border: 1px solid #4f8eff55; }
+.tag-vl { background: var(--vl-bg); color: var(--vl-color); border: 1px solid var(--vl-border); }
+.tag-cl { background: var(--cl-bg); color: var(--cl-color); border: 1px solid var(--cl-border); }
 
 .info-box {
     background: var(--surface);
@@ -384,7 +407,7 @@ def load_vendor_ledger(file):
             col_map[c] = 'closing'
     df = df.rename(columns=col_map)
 
-    needed = ['doc_date', 'doc_no', 'doc_type', 'debit', 'credit', 'particulars']
+    needed = ['doc_date', 'doc_no', 'doc_type', 'debit', 'credit', 'particulars', 'closing']
     for col in needed:
         if col not in df.columns:
             df[col] = np.nan
@@ -392,6 +415,7 @@ def load_vendor_ledger(file):
     df['doc_date'] = pd.to_datetime(df['doc_date'], errors='coerce', dayfirst=True)
     df['debit'] = pd.to_numeric(df['debit'], errors='coerce').fillna(0)
     df['credit'] = pd.to_numeric(df['credit'], errors='coerce').fillna(0)
+    df['closing'] = pd.to_numeric(df['closing'], errors='coerce')
     df['doc_no_clean'] = df['doc_no'].apply(clean_doc_number)
     df['period'] = df['doc_date'].apply(get_period)
     df['particulars_ref'] = df['particulars'].apply(extract_ref_from_particulars)
@@ -967,7 +991,7 @@ def run_reconciliation(vl_orig, cl_orig, tolerance=1.0):
 # EXCEL EXPORT — with Vendor & Customer Ledger tabs + Remarks
 # ─────────────────────────────────────────────
 
-def build_excel(results, vl_orig, cl_orig):
+def build_excel(results, vl_orig, cl_orig, VL='Vendor', CL='Customer'):
     output = BytesIO()
     wb = openpyxl.Workbook()
 
@@ -1045,7 +1069,7 @@ def build_excel(results, vl_orig, cl_orig):
     # ── Title ──
     ws_sum.merge_cells('A1:I1')
     tc = ws_sum['A1']
-    tc.value = '⚖️  VENDOR RECONCILIATION SUMMARY'
+    tc.value = f'⚖️  LEDGER RECONCILIATION SUMMARY — {VL} vs {CL}'
     tc.font = Font(bold=True, size=14, color='FFFFFF', name='Calibri')
     tc.fill = PatternFill(fill_type='solid', fgColor='1C2130')
     tc.alignment = Alignment(horizontal='center', vertical='center')
@@ -1198,33 +1222,41 @@ def build_excel(results, vl_orig, cl_orig):
     # ══════════════════════════════════════════
     # SHEET 2: VENDOR LEDGER WITH REMARKS
     # ══════════════════════════════════════════
-    vl_ann = vl_orig  # passed in as argument
-    ws_vl = wb.create_sheet('Vendor Ledger')
+    vl_ann = vl_orig
+    ws_vl = wb.create_sheet(f'{VL[:18]} Vendor Ledger'[:31])
     ws_vl.sheet_view.showGridLines = False
-    ws_vl.freeze_panes = 'A2'
+    ws_vl.freeze_panes = 'A3'
 
-    # Choose display columns
-    vl_display_cols = ['doc_date', 'doc_no', 'doc_type', 'particulars', 'debit', 'credit']
+    vl_display_cols = ['doc_date', 'doc_no', 'doc_type', 'particulars', 'debit', 'credit', 'closing']
     vl_display_cols = [c for c in vl_display_cols if c in vl_ann.columns]
     vl_display_cols += ['_remark', '_match_ref']
+    ncols_vl = len(vl_display_cols)
 
-    vl_headers = {
-        'doc_date': 'Doc Date', 'doc_no': 'Doc No', 'doc_type': 'Doc Type',
-        'particulars': 'Particulars', 'debit': 'Debit', 'credit': 'Credit',
-        '_remark': 'Remark', '_match_ref': 'Matched With'
-    }
-    headers = [vl_headers.get(c, c) for c in vl_display_cols]
-    style_header(ws_vl, headers, row=1, color='1C2130')
+    ws_vl.merge_cells(f'A1:{get_column_letter(ncols_vl)}1')
+    title_vl = ws_vl['A1']
+    title_vl.value = f'📘 {VL} — VENDOR LEDGER WITH REMARKS'
+    title_vl.font = Font(bold=True, size=12, color='FFFFFF', name='Calibri')
+    title_vl.fill = PatternFill(fill_type='solid', fgColor='1A3A6B')
+    title_vl.alignment = Alignment(horizontal='center', vertical='center')
+    ws_vl.row_dimensions[1].height = 28
 
-    for r_idx, (_, row) in enumerate(vl_ann[vl_display_cols].iterrows(), 2):
+    vl_hmap = {'doc_date':'Doc Date','doc_no':'Doc No','doc_type':'Doc Type',
+               'particulars':'Particulars','debit':'Debit','credit':'Credit',
+               'closing':'Closing Balance','_remark':'Remark','_match_ref':'Matched With'}
+    headers = [vl_hmap.get(c, c) for c in vl_display_cols]
+    style_header(ws_vl, headers, row=2, color='1A3A6B')
+
+    debit_col_vl  = (vl_display_cols.index('debit')  + 1) if 'debit'  in vl_display_cols else None
+    credit_col_vl = (vl_display_cols.index('credit') + 1) if 'credit' in vl_display_cols else None
+
+    for r_idx, (_, row) in enumerate(vl_ann[vl_display_cols].iterrows(), 3):
         remark = str(row.get('_remark', ''))
         if 'Unmatched' in remark or 'Mismatch' in remark or 'Not Found' in remark:
-            fill = COLORS['unmatched_fill']    # RED
+            fill = COLORS['unmatched_fill']
         elif 'Reversal Entry' in remark or 'Invoice Reversed' in remark:
-            fill = COLORS['reversal_fill']     # YELLOW — genuine reversal
+            fill = COLORS['reversal_fill']
         else:
-            fill = COLORS['matched_fill']      # GREEN
-
+            fill = COLORS['matched_fill']
         for c_idx, col in enumerate(vl_display_cols, 1):
             val = row[col]
             cell = write_cell(ws_vl, r_idx, c_idx, val)
@@ -1234,32 +1266,54 @@ def build_excel(results, vl_orig, cl_orig):
             cell.font = Font(name='Calibri', size=9)
         ws_vl.row_dimensions[r_idx].height = 18
 
+    sub_r_vl = len(vl_ann) + 3
+    for c_idx in range(1, ncols_vl + 1):
+        cell = ws_vl.cell(row=sub_r_vl, column=c_idx)
+        cell.fill = PatternFill(fill_type='solid', fgColor='1A3A6B')
+        cell.border = border
+        cell.font = Font(bold=True, color='FFFFFF', name='Calibri', size=10)
+    ws_vl.cell(row=sub_r_vl, column=1).value = 'SUBTOTAL'
+    for col_i in [debit_col_vl, credit_col_vl]:
+        if col_i:
+            cl = get_column_letter(col_i)
+            ws_vl.cell(row=sub_r_vl, column=col_i).value = f'=SUBTOTAL(9,{cl}3:{cl}{sub_r_vl-1})'
+            ws_vl.cell(row=sub_r_vl, column=col_i).number_format = '#,##0.00'
+    ws_vl.row_dimensions[sub_r_vl].height = 22
     auto_width(ws_vl)
 
     # ══════════════════════════════════════════
     # SHEET 3: CUSTOMER LEDGER WITH REMARKS
     # ══════════════════════════════════════════
-    cl_ann = cl_orig  # passed in as argument
-    ws_cl = wb.create_sheet('Customer Ledger')
+    cl_ann = cl_orig
+    ws_cl = wb.create_sheet(f'{CL[:18]} Customer Ledger'[:31])
     ws_cl.sheet_view.showGridLines = False
-    ws_cl.freeze_panes = 'A2'
+    ws_cl.freeze_panes = 'A3'
 
     cl_display_cols = ['doc_date', 'doc_no', 'doc_type', 'debit', 'credit']
     cl_display_cols = [c for c in cl_display_cols if c in cl_ann.columns]
     cl_display_cols += ['_remark', '_match_ref']
+    ncols_cl = len(cl_display_cols)
 
-    cl_headers = {
-        'doc_date': 'Doc Date', 'doc_no': 'Doc No', 'doc_type': 'Doc Type',
-        'debit': 'Debit (LC)', 'credit': 'Credit (LC)',
-        '_remark': 'Remark', '_match_ref': 'Matched With'
-    }
-    headers = [cl_headers.get(c, c) for c in cl_display_cols]
-    style_header(ws_cl, headers, row=1, color='1C2130')
+    ws_cl.merge_cells(f'A1:{get_column_letter(ncols_cl)}1')
+    title_cl = ws_cl['A1']
+    title_cl.value = f'📗 {CL} — CUSTOMER LEDGER WITH REMARKS'
+    title_cl.font = Font(bold=True, size=12, color='FFFFFF', name='Calibri')
+    title_cl.fill = PatternFill(fill_type='solid', fgColor='1A6B45')
+    title_cl.alignment = Alignment(horizontal='center', vertical='center')
+    ws_cl.row_dimensions[1].height = 28
 
-    for r_idx, (_, row) in enumerate(cl_ann[cl_display_cols].iterrows(), 2):
+    cl_hmap = {'doc_date':'Doc Date','doc_no':'Doc No','doc_type':'Doc Type',
+               'debit':'Debit (LC)','credit':'Credit (LC)',
+               '_remark':'Remark','_match_ref':'Matched With'}
+    headers = [cl_hmap.get(c, c) for c in cl_display_cols]
+    style_header(ws_cl, headers, row=2, color='1A6B45')
+
+    debit_col_cl  = (cl_display_cols.index('debit')  + 1) if 'debit'  in cl_display_cols else None
+    credit_col_cl = (cl_display_cols.index('credit') + 1) if 'credit' in cl_display_cols else None
+
+    for r_idx, (_, row) in enumerate(cl_ann[cl_display_cols].iterrows(), 3):
         remark = str(row.get('_remark', ''))
         fill = COLORS['unmatched_fill'] if 'Unmatched' in remark else COLORS['matched_fill']
-
         for c_idx, col in enumerate(cl_display_cols, 1):
             val = row[col]
             cell = write_cell(ws_cl, r_idx, c_idx, val)
@@ -1269,45 +1323,147 @@ def build_excel(results, vl_orig, cl_orig):
             cell.font = Font(name='Calibri', size=9)
         ws_cl.row_dimensions[r_idx].height = 18
 
+    sub_r_cl = len(cl_ann) + 3
+    for c_idx in range(1, ncols_cl + 1):
+        cell = ws_cl.cell(row=sub_r_cl, column=c_idx)
+        cell.fill = PatternFill(fill_type='solid', fgColor='1A6B45')
+        cell.border = border
+        cell.font = Font(bold=True, color='FFFFFF', name='Calibri', size=10)
+    ws_cl.cell(row=sub_r_cl, column=1).value = 'SUBTOTAL'
+    for col_i in [debit_col_cl, credit_col_cl]:
+        if col_i:
+            cl_l = get_column_letter(col_i)
+            ws_cl.cell(row=sub_r_cl, column=col_i).value = f'=SUBTOTAL(9,{cl_l}3:{cl_l}{sub_r_cl-1})'
+            ws_cl.cell(row=sub_r_cl, column=col_i).number_format = '#,##0.00'
+    ws_cl.row_dimensions[sub_r_cl].height = 22
     auto_width(ws_cl)
 
     # ══════════════════════════════════════════
-    # REMAINING DETAIL SHEETS
+    # DETAIL SHEETS WITH SUBTOTALS
     # ══════════════════════════════════════════
     def write_sheet(title, data, color):
         if not data:
             return
-        ws = wb.create_sheet(title)
+        ws = wb.create_sheet(title[:31])
         ws.sheet_view.showGridLines = False
         ws.freeze_panes = 'A2'
         df = pd.DataFrame(data)
-        headers = list(df.columns)
-        style_header(ws, headers, row=1, color=color)
+        hdrs = list(df.columns)
+        ncols = len(hdrs)
+        for c_idx, h in enumerate(hdrs, 1):
+            cell = ws.cell(row=1, column=c_idx, value=h)
+            if any(x in h for x in ['VL', VL[:4]]):
+                hc = '1A3A6B'
+            elif any(x in h for x in ['CL', CL[:4]]):
+                hc = '1A6B45'
+            else:
+                hc = color
+            cell.font = Font(bold=True, color='FFFFFF', name='Calibri', size=10)
+            cell.fill = PatternFill(fill_type='solid', fgColor=hc)
+            cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+            cell.border = border
+        ws.row_dimensions[1].height = 28
         for r, (_, row) in enumerate(df.iterrows(), 2):
             for c, val in enumerate(row.values, 1):
                 cell = write_cell(ws, r, c, val)
-                fill = 'F8F9FB' if r % 2 == 0 else 'FFFFFF'
+                fill = 'EEF2FF' if r % 2 == 0 else 'FFFFFF'
                 cell.fill = PatternFill(fill_type='solid', fgColor=fill)
                 cell.border = border
                 cell.alignment = Alignment(vertical='center')
                 cell.font = Font(name='Calibri', size=9)
+            ws.row_dimensions[r].height = 18
+        sub_r = len(data) + 2
+        for c_idx, h in enumerate(hdrs, 1):
+            cell = ws.cell(row=sub_r, column=c_idx)
+            cell.fill = PatternFill(fill_type='solid', fgColor='1C2130')
+            cell.font = Font(bold=True, color='FFFFFF', name='Calibri', size=10)
+            cell.border = border
+            cell.alignment = Alignment(horizontal='center', vertical='center')
+            if any(k in h.lower() for k in ['debit','credit','amount','value']):
+                cl_l = get_column_letter(c_idx)
+                cell.value = f'=SUBTOTAL(9,{cl_l}2:{cl_l}{sub_r-1})'
+                cell.number_format = '#,##0.00'
+            elif c_idx == 1:
+                cell.value = 'SUBTOTAL'
+        ws.row_dimensions[sub_r].height = 22
         auto_width(ws)
 
-    write_sheet('Inv - Matched', results['invoice_matched'], '1A6B45')
-    write_sheet('Inv - Unmatched VL', results['invoice_unmatched_vl'], 'A32035')
-    write_sheet('Inv - Unmatched CL', results['invoice_unmatched_cl'], 'A32035')
-    write_sheet('DN - Matched', results['dn_matched'], '1A6B45')
-    write_sheet('DN - Unmatched VL', results['dn_unmatched_vl'], 'A32035')
-    write_sheet('DN - Unmatched CL', results['dn_unmatched_cl'], 'A32035')
-    write_sheet('Collections - Matched', results['collection_matched'], '1A6B45')
-    write_sheet('Collections - Unmatch VL', results['collection_unmatched_vl'], 'A32035')
-    write_sheet('Collections - Unmatch CL', results['collection_unmatched_cl'], 'A32035')
-    write_sheet('Reversal - Cross Ledger', results['reversal_cross_ledger'], 'B85C00')
-    write_sheet('Reversal - VL Internal', results['reversal_vl_internal'], '7B5EA7')
-    write_sheet('Reversal - Unmatched', results['reversal_unmatched'], 'A32035')
+    write_sheet(f'Inv-Matched', results['invoice_matched'], '1A6B45')
+    write_sheet(f'Inv-Unmatch-{VL[:6]}', results['invoice_unmatched_vl'], 'A32035')
+    write_sheet(f'Inv-Unmatch-{CL[:6]}', results['invoice_unmatched_cl'], 'A32035')
+    write_sheet('DN-CN-Matched', results['dn_matched'], '1A6B45')
+    write_sheet(f'DN-Unmatch-{VL[:6]}', results['dn_unmatched_vl'], 'A32035')
+    write_sheet(f'DN-Unmatch-{CL[:6]}', results['dn_unmatched_cl'], 'A32035')
+    write_sheet('Coll-Matched', results['collection_matched'], '1A6B45')
+    write_sheet(f'Coll-Unmatch-{VL[:6]}', results['collection_unmatched_vl'], 'A32035')
+    write_sheet(f'Coll-Unmatch-{CL[:6]}', results['collection_unmatched_cl'], 'A32035')
+    write_sheet('AnnexA-CrossLedger', results['reversal_cross_ledger'], 'B85C00')
+    write_sheet('AnnexB-VL-Internal', results['reversal_vl_internal'], '7B5EA7')
+    rev_mis  = [r for r in results['reversal_unmatched'] if r.get('Reason','') == 'Amount Mismatch']
+    rev_miss = [r for r in results['reversal_unmatched'] if r.get('Reason','') != 'Amount Mismatch']
+    write_sheet('AnnexC1-AmtMismatch', rev_mis,  'A32035')
+    write_sheet('AnnexC2-MissingOrig', rev_miss, 'A32035')
+
+    # ══════════════════════════════════════════
+    # RECON STATEMENT SHEET
+    # ══════════════════════════════════════════
+    ws_rs = wb.create_sheet('Recon Statement')
+    ws_rs.sheet_view.showGridLines = False
+    ws_rs.column_dimensions['A'].width = 58
+    ws_rs.column_dimensions['B'].width = 22
+
+    def ssum(lst, key):
+        try: return sum(float(d.get(key, 0) or 0) for d in lst)
+        except: return 0.0
+
+    inv_un_vl_v  = ssum(results['invoice_unmatched_vl'],   'Debit') + ssum(results['invoice_unmatched_vl'],   'Credit')
+    inv_un_cl_v  = ssum(results['invoice_unmatched_cl'],   'Debit') + ssum(results['invoice_unmatched_cl'],   'Credit')
+    dn_un_cl_v   = ssum(results['dn_unmatched_cl'],        'Debit') + ssum(results['dn_unmatched_cl'],        'Credit')
+    col_un_vl_v  = ssum(results['collection_unmatched_vl'],'Debit') + ssum(results['collection_unmatched_vl'],'Credit')
+    col_un_cl_v  = ssum(results['collection_unmatched_cl'],'Debit') + ssum(results['collection_unmatched_cl'],'Credit')
+    cn_v         = ssum([r for r in results['dn_matched'] if 'Credit Note' in str(r.get('Match Type',''))], 'VL Debit') +                    ssum([r for r in results['dn_matched'] if 'Credit Note' in str(r.get('Match Type',''))], 'VL Credit')
+    rev_cross_v  = ssum(results['reversal_cross_ledger'], 'VL Original Debit') + ssum(results['reversal_cross_ledger'], 'VL Original Credit')
+    vl_close     = results.get('vl_closing') or 0.0
+
+    rs_rows = [
+        ('Particular', 'Amount (₹)', 'H'),
+        (f'Balance as per {VL} Books (A)', vl_close, 'VL'),
+        (f'Less:  Tax Invoice delivered but not available in {CL}', -inv_un_vl_v, 'L'),
+        (f'Add:   Credit Note available in {VL} but not in {CL}', cn_v, 'A'),
+        (f'Less:  Debit Notes available in {CL} but not in {VL}', -dn_un_cl_v, 'L'),
+        (f'Add:   Tax Invoice delivered but not available in {VL}', inv_un_cl_v, 'A'),
+        (f'Add:   Payment not available in {CL}', col_un_vl_v, 'A'),
+        (f'Less:  Payment not available in {VL}', -col_un_cl_v, 'L'),
+        ('', '', 'B'),
+        (f'Net Balance as per {VL} Books — B', '=SUM(B2:B8)', 'T'),
+        ('', '', 'B'),
+        (f'Balance as per {CL} Books — C', inv_un_cl_v - inv_un_vl_v, 'CL'),
+        ('', '', 'B'),
+        ('Unreconciled Difference (B - C)', '=B10-B12', 'D'),
+        ('(This value should be zero after all the adjustments)', '', 'N'),
+    ]
+
+    fill_map = {'H':('1C2130','E8ECF4'),'VL':('1A3A6B','FFFFFF'),'L':('FFE8E8','A32035'),
+                'A':('E8F5EE','1A6B45'),'B':('FFFFFF','FFFFFF'),'T':('1A3A6B','FFFFFF'),
+                'CL':('1A6B45','FFFFFF'),'D':('CC0000','FFFFFF'),'N':('CC0000','FFFFFF')}
+
+    for r_ptr, (label, amount, rtype) in enumerate(rs_rows, 1):
+        bg, fg = fill_map.get(rtype, ('FFFFFF','000000'))
+        cell_a = ws_rs.cell(row=r_ptr, column=1, value=label)
+        cell_b = ws_rs.cell(row=r_ptr, column=2, value=amount)
+        for cell in [cell_a, cell_b]:
+            cell.fill = PatternFill(fill_type='solid', fgColor=bg)
+            cell.font = Font(name='Calibri', size=10, color=fg,
+                             bold=(rtype in ('H','VL','T','CL','D')))
+            cell.border = border
+        cell_b.alignment = Alignment(horizontal='right', vertical='center')
+        if isinstance(amount, (int, float)):
+            cell_b.number_format = '#,##0.00'
+        ws_rs.row_dimensions[r_ptr].height = 22 if rtype != 'B' else 8
 
     wb.save(output)
     return output.getvalue()
+
 
 # ─────────────────────────────────────────────
 # UI HELPERS
@@ -1329,18 +1485,65 @@ def display_df(df):
 # MAIN APP
 # ─────────────────────────────────────────────
 
+def fmt_inr(val):
+    """Format number as Indian currency."""
+    try:
+        v = float(val)
+        return f"₹{v:,.2f}"
+    except:
+        return "₹0.00"
+
+def safe_sum(lst, key):
+    """Sum a key across a list of dicts."""
+    try:
+        return sum(float(d.get(key, 0) or 0) for d in lst)
+    except:
+        return 0.0
+
+# ─────────────────────────────────────────────
+# MAIN APP
+# ─────────────────────────────────────────────
+
 def main():
+    # ── Step 0: Vendor / Customer Name Entry ──
+    # Collect names before anything else is shown
+    if 'vname' not in st.session_state:
+        st.session_state['vname'] = ''
+    if 'cname' not in st.session_state:
+        st.session_state['cname'] = ''
+
+    # Header
     st.markdown("""
     <div class="recon-header">
         <div>
-            <div class="recon-logo">⚖️ VendorSync</div>
+            <div class="recon-logo">⚖️ Ledger Reconciliation</div>
             <div class="recon-subtitle">Vendor · Customer Ledger Reconciliation · For Indian CAs &amp; CFOs</div>
         </div>
     </div>
     """, unsafe_allow_html=True)
 
+    # Name inputs always visible at top
+    nc1, nc2, nc3 = st.columns([2, 2, 1])
+    with nc1:
+        vname = st.text_input("🏭 Vendor Name", value=st.session_state['vname'],
+                               placeholder="e.g. ABC Suppliers Pvt. Ltd.")
+        if vname:
+            st.session_state['vname'] = vname
+    with nc2:
+        cname = st.text_input("🏢 Customer Name", value=st.session_state['cname'],
+                               placeholder="e.g. XYZ Traders Ltd.")
+        if cname:
+            st.session_state['cname'] = cname
+
+    vname = st.session_state.get('vname', 'Vendor') or 'Vendor'
+    cname = st.session_state.get('cname', 'Customer') or 'Customer'
+
+    VL = vname   # use actual names everywhere
+    CL = cname
+
+    # Sidebar
     with st.sidebar:
-        st.markdown("### ⚙️ Configuration")
+        st.markdown(f"### ⚙️ Configuration")
         st.markdown("---")
         tolerance = st.number_input(
             "Amount Tolerance (₹)",
@@ -1349,41 +1552,40 @@ def main():
         )
         st.markdown("---")
         st.markdown("### 📋 Matching Rules")
-        st.markdown("""
+        st.markdown(f"""
         <div class="info-box">
         1. Invoices → Doc Number<br>
-        2. Reversals → Complete Reversal / Saleable Return (via Particulars)<br>
-        3. Debit Notes → Doc No → Period+Amount<br>
-        4. Collections → UTR → Period+Amount<br>
-        5. All items get ✅ Matched / ❌ Unmatched remark
+        2. Reversals → Complete Reversal / Saleable Return<br>
+        3. Credit Notes ({VL}) → Discount DN / PRN ({CL})<br>
+        4. Debit Notes → Doc No → Period+Amount<br>
+        5. Collections → UTR → Period+Amount<br>
+        6. Remaining → Unmatched
         </div>
         """, unsafe_allow_html=True)
         st.markdown("---")
-        st.markdown("""
+        st.markdown(f"""
         <div class="info-box" style="font-size:0.72rem;">
-        <b>Excel Output includes:</b><br>
-        • Summary sheet with match rates<br>
-        • Vendor Ledger tab with remarks<br>
-        • Customer Ledger tab with remarks<br>
-        • Detail sheets per category
+        <b>Color Code:</b><br>
+        <span style="color:var(--vl-color)">■ {VL}</span> (Blue)<br>
+        <span style="color:var(--cl-color)">■ {CL}</span> (Teal)<br>
+        <span style="color:#00d4aa">■ Matched</span> · <span style="color:#ff4d6d">■ Unmatched</span>
         </div>
         """, unsafe_allow_html=True)
 
-    # File upload
+    # File upload with vendor/customer color coding
     col1, col2 = st.columns(2)
     with col1:
-        st.markdown('<span class="section-tag tag-blue">VENDOR LEDGER</span>', unsafe_allow_html=True)
-        vl_file = st.file_uploader("Upload Vendor Ledger (.xlsx / .xls)", type=['xlsx', 'xls'], key='vl')
+        st.markdown(f'<span class="section-tag tag-vl">📘 {VL.upper()} — VENDOR LEDGER</span>', unsafe_allow_html=True)
+        vl_file = st.file_uploader(f"Upload {VL} Ledger (.xlsx / .xls)", type=['xlsx', 'xls'], key='vl')
     with col2:
-        st.markdown('<span class="section-tag tag-blue">CUSTOMER LEDGER</span>', unsafe_allow_html=True)
-        cl_file = st.file_uploader("Upload Customer Ledger (.xlsx / .xls)", type=['xlsx', 'xls'], key='cl')
+        st.markdown(f'<span class="section-tag tag-cl">📗 {CL.upper()} — CUSTOMER LEDGER</span>', unsafe_allow_html=True)
+        cl_file = st.file_uploader(f"Upload {CL} Ledger (.xlsx / .xls)", type=['xlsx', 'xls'], key='cl')
 
     if not vl_file or not cl_file:
-        st.markdown("""
+        st.markdown(f"""
         <div class="info-box" style="margin-top:2rem; border-left-color: #4f8eff;">
-        📂 Upload both ledger files above to begin reconciliation. The engine will automatically detect columns,
-        handle reversals (Complete Reversal / Saleable Return), match invoices, debit notes, and collections,
-        and add Matched/Unmatched remarks to each row in the output Excel.
+        📂 Upload both ledger files above to begin reconciliation.<br>
+        Enter <b>{VL}</b> and <b>{CL}</b> names above for personalised output.
         </div>
         """, unsafe_allow_html=True)
         return
@@ -1396,16 +1598,22 @@ def main():
             st.error(f"Error reading files: {e}")
             return
 
-    st.success(f"✅ Vendor Ledger: **{len(vl)}** rows  ·  Customer Ledger: **{len(cl)}** rows")
+    # Closing balances
+    vl_closing = vl['closing'].dropna().iloc[-1] if 'closing' in vl.columns and not vl['closing'].dropna().empty else None
+    cl_closing = (cl['debit'].sum() - cl['credit'].sum()) if 'debit' in cl.columns else None
+
+    st.success(f"✅ {VL}: **{len(vl)}** rows  ·  {CL}: **{len(cl)}** rows")
+    if vl_closing is not None:
+        st.info(f"📘 **{VL} Closing Balance:** {fmt_inr(vl_closing)}")
 
     with st.expander("👁 Preview Parsed Data"):
         pc1, pc2 = st.columns(2)
         with pc1:
-            st.markdown("**Vendor Ledger (first 10 rows)**")
-            display_cols = [c for c in ['doc_date', 'doc_no', 'doc_type', 'particulars', 'debit', 'credit'] if c in vl.columns]
+            st.markdown(f'<span class="section-tag tag-vl">{VL} — VENDOR LEDGER</span>', unsafe_allow_html=True)
+            display_cols = [c for c in ['doc_date', 'doc_no', 'doc_type', 'particulars', 'debit', 'credit', 'closing'] if c in vl.columns]
             st.dataframe(vl[display_cols].head(10), use_container_width=True, hide_index=True)
         with pc2:
-            st.markdown("**Customer Ledger (first 10 rows)**")
+            st.markdown(f'<span class="section-tag tag-cl">{CL} — CUSTOMER LEDGER</span>', unsafe_allow_html=True)
             display_cols = [c for c in ['doc_date', 'doc_no', 'doc_type', 'debit', 'credit'] if c in cl.columns]
             st.dataframe(cl[display_cols].head(10), use_container_width=True, hide_index=True)
 
@@ -1413,7 +1621,6 @@ def main():
         with st.spinner("Running reconciliation engine..."):
             results = run_reconciliation(vl, cl, tolerance=tolerance)
 
-        # Preserve annotated ledgers — convert to records but keep numeric cols as numbers
         def safe_records(df):
             d = df.copy()
             for col in d.columns:
@@ -1425,119 +1632,246 @@ def main():
 
         results['vl_annotated'] = safe_records(results['vl_annotated'])
         results['cl_annotated'] = safe_records(results['cl_annotated'])
+        results['vl_closing'] = float(vl_closing) if vl_closing is not None else None
+        results['vl_name'] = VL
+        results['cl_name'] = CL
         st.session_state['results'] = results
 
     if 'results' not in st.session_state:
         return
 
     results = st.session_state['results']
-    # Restore annotated ledgers as DataFrames
+    VL = results.get('vl_name', vname) or vname
+    CL = results.get('cl_name', cname) or cname
     vl_ann_df = pd.DataFrame(results['vl_annotated'])
-    cl_ann_df = pd.DataFrame(results['cl_annotated'])
+    cl_ann_df  = pd.DataFrame(results['cl_annotated'])
+    vl_closing_val = results.get('vl_closing')
 
-    # ── SUMMARY STATS ──
-    # Separate Credit Note matches from regular DN matches for display
-    cn_matched = [r for r in results['dn_matched'] if 'Credit Note' in str(r.get('Match Type', ''))]
+    # ── Compute values for summary ──
+    cn_matched      = [r for r in results['dn_matched'] if 'Credit Note' in str(r.get('Match Type', ''))]
     dn_only_matched = [r for r in results['dn_matched'] if 'Credit Note' not in str(r.get('Match Type', ''))]
-    total_matched = len(results['invoice_matched']) + len(results['dn_matched']) + len(results['collection_matched'])
-    total_unmatched_vl = len(results['invoice_unmatched_vl']) + len(results['dn_unmatched_vl']) + len(results['collection_unmatched_vl'])
-    total_unmatched_cl = len(results['invoice_unmatched_cl']) + len(results['dn_unmatched_cl']) + len(results['collection_unmatched_cl'])
-    total_cross_ledger = len(results['reversal_cross_ledger'])
-    total_vl_internal = len(results['reversal_vl_internal'])
-    total_rev_unmatched = len(results['reversal_unmatched'])
 
+    inv_matched_cnt  = len(results['invoice_matched'])
+    inv_un_vl_cnt    = len(results['invoice_unmatched_vl'])
+    inv_un_cl_cnt    = len(results['invoice_unmatched_cl'])
+    dn_matched_cnt   = len(dn_only_matched)
+    dn_un_vl_cnt     = len(results['dn_unmatched_vl'])
+    dn_un_cl_cnt     = len(results['dn_unmatched_cl'])
+    cn_matched_cnt   = len(cn_matched)
+    col_matched_cnt  = len(results['collection_matched'])
+    col_un_vl_cnt    = len(results['collection_unmatched_vl'])
+    col_un_cl_cnt    = len(results['collection_unmatched_cl'])
+    rev_cross_cnt    = len(results['reversal_cross_ledger'])
+    rev_int_cnt      = len(results['reversal_vl_internal'])
+    rev_un_cnt       = len(results['reversal_unmatched'])
+    rev_amt_mis_cnt  = len([r for r in results['reversal_unmatched'] if r.get('Reason','') == 'Amount Mismatch'])
+    rev_miss_cnt     = rev_un_cnt - rev_amt_mis_cnt
+
+    # Values (credit/debit sums)
+    inv_matched_val  = safe_sum(results['invoice_matched'], 'VL Debit') + safe_sum(results['invoice_matched'], 'VL Credit')
+    inv_un_vl_val    = safe_sum(results['invoice_unmatched_vl'], 'Debit') + safe_sum(results['invoice_unmatched_vl'], 'Credit')
+    inv_un_cl_val    = safe_sum(results['invoice_unmatched_cl'], 'Debit') + safe_sum(results['invoice_unmatched_cl'], 'Credit')
+    dn_matched_val   = safe_sum(dn_only_matched, 'VL Debit') + safe_sum(dn_only_matched, 'VL Credit')
+    dn_un_vl_val     = safe_sum(results['dn_unmatched_vl'], 'Debit') + safe_sum(results['dn_unmatched_vl'], 'Credit')
+    dn_un_cl_val     = safe_sum(results['dn_unmatched_cl'], 'Debit') + safe_sum(results['dn_unmatched_cl'], 'Credit')
+    cn_matched_val   = safe_sum(cn_matched, 'VL Debit') + safe_sum(cn_matched, 'VL Credit')
+    col_matched_val  = safe_sum(results['collection_matched'], 'VL Amount')
+    col_un_vl_val    = safe_sum(results['collection_unmatched_vl'], 'Debit') + safe_sum(results['collection_unmatched_vl'], 'Credit')
+    col_un_cl_val    = safe_sum(results['collection_unmatched_cl'], 'Debit') + safe_sum(results['collection_unmatched_cl'], 'Credit')
+    rev_cross_val    = safe_sum(results['reversal_cross_ledger'], 'VL Original Debit') + safe_sum(results['reversal_cross_ledger'], 'VL Original Credit')
+    rev_int_val      = safe_sum(results['reversal_vl_internal'], 'VL Original Debit') + safe_sum(results['reversal_vl_internal'], 'VL Original Credit')
+    rev_un_val       = safe_sum(results['reversal_unmatched'], 'VL Debit') + safe_sum(results['reversal_unmatched'], 'VL Credit')
+
+    total_matched_cnt = inv_matched_cnt + dn_matched_cnt + cn_matched_cnt + col_matched_cnt
+    total_matched_val = inv_matched_val + dn_matched_val + cn_matched_val + col_matched_val
+    total_un_vl_cnt   = inv_un_vl_cnt + dn_un_vl_cnt + col_un_vl_cnt
+    total_un_vl_val   = inv_un_vl_val + dn_un_vl_val + col_un_vl_val
+    total_un_cl_cnt   = inv_un_cl_cnt + dn_un_cl_cnt + col_un_cl_cnt
+    total_un_cl_val   = inv_un_cl_val + dn_un_cl_val + col_un_cl_val
+
+    # ── STAT CARDS ──
     st.markdown(f"""
     <div class="stat-grid">
         <div class="stat-card matched">
             <div class="stat-label">Total Matched</div>
-            <div class="stat-value">{total_matched}</div>
-            <div class="stat-sub">Inv + DN + CN + Collections</div>
+            <div class="stat-value">{total_matched_cnt}</div>
+            <div class="stat-sub">{fmt_inr(total_matched_val)}</div>
         </div>
         <div class="stat-card unmatched">
-            <div class="stat-label">Unmatched (VL)</div>
-            <div class="stat-value">{total_unmatched_vl}</div>
-            <div class="stat-sub">CL Unmatched: {total_unmatched_cl}</div>
+            <div class="stat-label">Unmatched ({VL})</div>
+            <div class="stat-value">{total_un_vl_cnt}</div>
+            <div class="stat-sub">{fmt_inr(total_un_vl_val)} · {CL}: {total_un_cl_cnt} ({fmt_inr(total_un_cl_val)})</div>
         </div>
         <div class="stat-card partial">
             <div class="stat-label">Credit Notes Matched</div>
-            <div class="stat-value">{len(cn_matched)}</div>
-            <div class="stat-sub">vs Discount DN / PRN in CL</div>
+            <div class="stat-value">{cn_matched_cnt}</div>
+            <div class="stat-sub">{fmt_inr(cn_matched_val)} vs Discount DN / PRN</div>
         </div>
         <div class="stat-card total">
             <div class="stat-label">Invoice Matches</div>
-            <div class="stat-value">{len(results['invoice_matched'])}</div>
-            <div class="stat-sub">DN: {len(dn_only_matched)} · Coll: {len(results['collection_matched'])}</div>
+            <div class="stat-value">{inv_matched_cnt}</div>
+            <div class="stat-sub">{fmt_inr(inv_matched_val)} · DN: {dn_matched_cnt} · Coll: {col_matched_cnt}</div>
         </div>
     </div>
     """, unsafe_allow_html=True)
 
-    # ── DETAILED SUMMARY TABLE linked to Annexures ──
+    # ── DASHBOARD SUMMARY TABLE ──
     st.markdown("### 📊 Reconciliation Summary")
-    st.caption("Click any 'View Annexure' button below to jump directly to that section.")
+    st.caption("Each row shows Count and Value. Click 'View ↓' to jump to that annexure.")
 
-    inv_vl = len(results['invoice_matched']) + len(results['invoice_unmatched_vl'])
-    inv_cl = len(results['invoice_matched']) + len(results['invoice_unmatched_cl'])
-    dn_vl = len(results['dn_matched']) + len(results['dn_unmatched_vl'])
-    dn_cl = len(results['dn_matched']) + len(results['dn_unmatched_cl'])
-    col_vl = len(results['collection_matched']) + len(results['collection_unmatched_vl'])
-    col_cl = len(results['collection_matched']) + len(results['collection_unmatched_cl'])
+    inv_vl  = inv_matched_cnt + inv_un_vl_cnt
+    inv_cl  = inv_matched_cnt + inv_un_cl_cnt
+    dn_vl   = dn_matched_cnt  + dn_un_vl_cnt
+    dn_cl   = dn_matched_cnt  + dn_un_cl_cnt
+    col_vl  = col_matched_cnt + col_un_vl_cnt
+    col_cl  = col_matched_cnt + col_un_cl_cnt
+    cn_vl   = cn_matched_cnt  + len([r for r in results['invoice_unmatched_vl'] if is_credit_note(str(r.get('Type','')))])
 
-    inv_pct = round(len(results['invoice_matched']) / inv_vl * 100, 1) if inv_vl else 0
-    dn_pct  = round(len(results['dn_matched']) / dn_vl * 100, 1) if dn_vl else 0
-    col_pct = round(len(results['collection_matched']) / col_vl * 100, 1) if col_vl else 0
+    inv_pct = round(inv_matched_cnt / inv_vl * 100, 1) if inv_vl else 0
+    dn_pct  = round(dn_matched_cnt  / dn_vl  * 100, 1) if dn_vl  else 0
+    col_pct = round(col_matched_cnt / col_vl * 100, 1) if col_vl else 0
+    cn_pct  = round(cn_matched_cnt  / cn_vl  * 100, 1) if cn_vl  else 0
 
-    cn_vl = len(cn_matched) + len([r for r in results['invoice_unmatched_vl'] if is_credit_note(str(r.get('Type','')))])
-    cn_pct = round(len(cn_matched) / cn_vl * 100, 1) if cn_vl else 0
+    def sum_row(label, vl_cnt, matched_cnt, un_vl_cnt, vl_val, matched_val, un_vl_val,
+                cl_cnt, un_cl_cnt, cl_val, un_cl_val, pct, tab_key, color,
+                mis_cnt=None, miss_cnt=None, mis_val=None, miss_val=None):
+        """Render one summary row with count+value and optional mismatch/missing split."""
+        ca, cb, cc, cd, ce, cf, cg, ch = st.columns([2.8, 1.4, 1.4, 1.4, 1.4, 1.4, 1, 1.2])
+        ca.markdown(f"**{label}**")
+        cb.markdown(f"<div style='text-align:center;font-size:0.78rem'><b>{vl_cnt}</b><br><span style='color:var(--muted);font-size:0.68rem'>{fmt_inr(vl_val)}</span></div>", unsafe_allow_html=True)
+        cc.markdown(f"<div style='text-align:center;font-size:0.78rem;color:{color}'><b>{matched_cnt}</b><br><span style='font-size:0.68rem'>{fmt_inr(matched_val)}</span></div>", unsafe_allow_html=True)
+        # Unmatched VL split into mismatch + missing if provided
+        if mis_cnt is not None:
+            cd.markdown(f"<div style='text-align:center;font-size:0.72rem;color:#ff4d6d'><b>{un_vl_cnt}</b><br>Mis: {mis_cnt} | Miss: {miss_cnt}</div>", unsafe_allow_html=True)
+        else:
+            cd.markdown(f"<div style='text-align:center;font-size:0.78rem;color:#ff4d6d'><b>{un_vl_cnt}</b><br><span style='font-size:0.68rem'>{fmt_inr(un_vl_val)}</span></div>", unsafe_allow_html=True)
+        ce.markdown(f"<div style='text-align:center;font-size:0.78rem'><b>{cl_cnt}</b></div>", unsafe_allow_html=True)
+        cf.markdown(f"<div style='text-align:center;font-size:0.78rem;color:#ff4d6d'><b>{un_cl_cnt}</b><br><span style='font-size:0.68rem'>{fmt_inr(un_cl_val)}</span></div>", unsafe_allow_html=True)
+        cg.markdown(f"<div style='text-align:center;color:{color};font-size:0.82rem'><b>{pct}%</b></div>", unsafe_allow_html=True)
+        if ch.button("View ↓", key=f"btn_{tab_key}"):
+            st.session_state['active_tab'] = tab_key
+        st.markdown("<hr style='margin:3px 0;border-color:#252c3d'>", unsafe_allow_html=True)
 
-    # Summary rows: (label, vl_total, matched, vl_unmatched, cl_total, cl_unmatched, pct, tab_key, color)
-    summary_rows_ui = [
-        ('🧾 Invoices',                        inv_vl,  len(results['invoice_matched']),   len(results['invoice_unmatched_vl']),   inv_cl,  len(results['invoice_unmatched_cl']),   f'{inv_pct}%',  'inv',        '#00d4aa'),
-        ('🟡 Credit Notes ↔ Discount DN / PRN', cn_vl,   len(cn_matched),                   cn_vl - len(cn_matched),                '-',     '-',                                    f'{cn_pct}%',   'cn_match',   '#4f8eff'),
-        ('📝 Debit Notes',                      dn_vl,   len(dn_only_matched),               len(results['dn_unmatched_vl']),        dn_cl,   len(results['dn_unmatched_cl']),        f'{dn_pct}%',   'dn',         '#00d4aa'),
-        ('💰 Collections',                      col_vl,  len(results['collection_matched']), len(results['collection_unmatched_vl']),col_cl,  len(results['collection_unmatched_cl']),f'{col_pct}%',  'col',        '#00d4aa'),
-        ('🔁 Reversed in VL — Also in CL',      total_cross_ledger, total_cross_ledger, 0,   total_cross_ledger, 0,                  '⚠️ Review', 'rev_cross', '#ff8c42'),
-        ('🔄 Reversed in VL — Not in CL',       total_vl_internal*2, total_vl_internal, 0,  '-',     '-',                            '✅ OK',     'rev_int',   '#00d4aa'),
-        ('❓ Reversal — Unmatched / Mismatch',   total_rev_unmatched, 0, total_rev_unmatched,'-',     '-',                            '❌ 0%',     'rev_un',    '#ff4d6d'),
+    # Header row
+    hc = st.columns([2.8, 1.4, 1.4, 1.4, 1.4, 1.4, 1, 1.2])
+    for col_obj, label in zip(hc, [
+        'Category',
+        f'{VL} Total (Cnt/Val)',
+        'Matched (Cnt/Val)',
+        f'{VL} Unmatch\n(Mis|Miss)',
+        f'{CL} Total',
+        f'{CL} Unmatch (Val)',
+        'Match%',
+        'Annexure'
+    ]):
+        col_obj.markdown(f"<div style='font-size:0.65rem;color:#4f8eff;text-transform:uppercase;font-weight:700;text-align:center'>{label}</div>", unsafe_allow_html=True)
+    st.markdown("<hr style='margin:4px 0;border-color:#4f8eff;border-width:2px'>", unsafe_allow_html=True)
+
+    sum_row('🧾 Invoices', inv_vl, inv_matched_cnt, inv_un_vl_cnt,
+            inv_matched_val+inv_un_vl_val, inv_matched_val, inv_un_vl_val,
+            inv_cl, inv_un_cl_cnt, inv_matched_val+inv_un_cl_val, inv_un_cl_val,
+            inv_pct, 'inv', '#00d4aa')
+
+    sum_row('🟡 Credit Notes ↔ Disc DN/PRN', cn_vl, cn_matched_cnt, cn_vl-cn_matched_cnt,
+            cn_matched_val, cn_matched_val, 0,
+            '-', '-', 0, 0,
+            cn_pct, 'cn_match', '#4f8eff')
+
+    sum_row('📝 Debit Notes', dn_vl, dn_matched_cnt, dn_un_vl_cnt,
+            dn_matched_val+dn_un_vl_val, dn_matched_val, dn_un_vl_val,
+            dn_cl, dn_un_cl_cnt, dn_matched_val+dn_un_cl_val, dn_un_cl_val,
+            dn_pct, 'dn', '#00d4aa')
+
+    sum_row('💰 Collections', col_vl, col_matched_cnt, col_un_vl_cnt,
+            col_matched_val+col_un_vl_val, col_matched_val, col_un_vl_val,
+            col_cl, col_un_cl_cnt, col_matched_val+col_un_cl_val, col_un_cl_val,
+            col_pct, 'col', '#00d4aa')
+
+    sum_row('🔁 Reversal — Also in CL', rev_cross_cnt, rev_cross_cnt, 0,
+            rev_cross_val, rev_cross_val, 0,
+            rev_cross_cnt, 0, rev_cross_val, 0,
+            100 if rev_cross_cnt else 0, 'rev_cross', '#ff8c42')
+
+    sum_row('🔄 Reversal — Not in CL', rev_int_cnt*2, rev_int_cnt, 0,
+            rev_int_val, rev_int_val, 0,
+            '-', '-', 0, 0,
+            100 if rev_int_cnt else 0, 'rev_int', '#00d4aa')
+
+    sum_row('❓ Reversal — Mismatch/Missing', rev_un_cnt, 0, rev_un_cnt,
+            rev_un_val, 0, rev_un_val,
+            '-', '-', 0, 0,
+            0, 'rev_un', '#ff4d6d',
+            mis_cnt=rev_amt_mis_cnt, miss_cnt=rev_miss_cnt,
+            mis_val=0, miss_val=0)
+
+    # TOTAL row
+    tc = st.columns([2.8, 1.4, 1.4, 1.4, 1.4, 1.4, 1, 1.2])
+    tc[0].markdown("**TOTAL**")
+    tc[1].markdown(f"<div style='text-align:center;font-weight:700'>{inv_vl+dn_vl+col_vl}<br><span style='font-size:0.7rem'>{fmt_inr(inv_matched_val+inv_un_vl_val+dn_matched_val+dn_un_vl_val+col_matched_val+col_un_vl_val)}</span></div>", unsafe_allow_html=True)
+    tc[2].markdown(f"<div style='text-align:center;font-weight:700;color:#00d4aa'>{total_matched_cnt}<br><span style='font-size:0.7rem'>{fmt_inr(total_matched_val)}</span></div>", unsafe_allow_html=True)
+    tc[3].markdown(f"<div style='text-align:center;font-weight:700;color:#ff4d6d'>{total_un_vl_cnt}<br><span style='font-size:0.7rem'>{fmt_inr(total_un_vl_val)}</span></div>", unsafe_allow_html=True)
+    tc[4].markdown(f"<div style='text-align:center;font-weight:700'>{inv_cl+dn_cl+col_cl}</div>", unsafe_allow_html=True)
+    tc[5].markdown(f"<div style='text-align:center;font-weight:700;color:#ff4d6d'>{total_un_cl_cnt}<br><span style='font-size:0.7rem'>{fmt_inr(total_un_cl_val)}</span></div>", unsafe_allow_html=True)
+
+    # ── LEDGER RECONCILIATION STATEMENT (sample format from image) ──
+    st.markdown("---")
+    st.markdown("### 📋 Ledger Reconciliation Statement")
+    vl_bal = float(vl_closing_val) if vl_closing_val else 0.0
+    adj_inv_vl     = inv_un_vl_val       # Tax invoice in VL not in CL → Less
+    adj_cn_vl      = cn_matched_val      # Credit note in VL not in CL → Add
+    adj_dn_cl      = dn_un_cl_val        # Debit notes in CL not in VL → Less
+    adj_inv_cl     = inv_un_cl_val       # Invoice in CL not in VL → Add
+    adj_pay_vl     = col_un_vl_val       # Payment in VL not in CL → Add
+    adj_pay_cl     = col_un_cl_val       # Payment in CL not in VL → Less
+    net_bal_b      = vl_bal - adj_inv_vl + adj_cn_vl - adj_dn_cl + adj_inv_cl + adj_pay_vl - adj_pay_cl
+    cl_balance     = total_un_cl_val - total_un_vl_val  # Approximate
+    diff_bc        = net_bal_b - cl_balance
+
+    recon_rows = [
+        ("Particular", "Amount", None),
+        (f"Balance as per {VL} Books as on (A)", fmt_inr(vl_bal), "header"),
+        (f"Less: Tax invoice delivered but not available in {CL}", fmt_inr(-adj_inv_vl), "less"),
+        (f"Add: Credit note available in {VL} but not in {CL} books", fmt_inr(adj_cn_vl), "add"),
+        (f"Less: Debit notes available in {CL} but not in {VL}", fmt_inr(-adj_dn_cl), "less"),
+        (f"Add: Tax invoice delivered but not available in {VL}", fmt_inr(adj_inv_cl), "add"),
+        (f"Add: Payment not available in {CL}", fmt_inr(adj_pay_vl), "add"),
+        (f"Less: Payment not available in {VL}", fmt_inr(-adj_pay_cl), "less"),
+        ("", "", None),
+        (f"Net Balance as per {VL} Books — B", fmt_inr(net_bal_b), "total"),
+        ("", "", None),
+        (f"Balance as per {CL} Books — C", fmt_inr(cl_balance), "total"),
+        ("", "", None),
+        ("Unreconciled Difference B - C", fmt_inr(diff_bc), "diff"),
+        ("(This value should be zero after all the adjustments)", "", "note"),
     ]
 
-    # Render as styled rows with View Annexure buttons
-    for row in summary_rows_ui:
-        label, vl_tot, matched, vl_un, cl_tot, cl_un, pct, tab_key, color = row
-        col_a, col_b, col_c, col_d, col_e, col_f, col_g, col_h = st.columns([3, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2, 1.5])
-        col_a.markdown(f"**{label}**")
-        col_b.markdown(f"<div style='text-align:center'>{vl_tot}</div>", unsafe_allow_html=True)
-        col_c.markdown(f"<div style='text-align:center;color:{color};font-weight:700'>{matched}</div>", unsafe_allow_html=True)
-        col_d.markdown(f"<div style='text-align:center;color:#ff4d6d;font-weight:700'>{vl_un}</div>", unsafe_allow_html=True)
-        col_e.markdown(f"<div style='text-align:center'>{cl_tot}</div>", unsafe_allow_html=True)
-        col_f.markdown(f"<div style='text-align:center;color:#ff4d6d;font-weight:700'>{cl_un}</div>", unsafe_allow_html=True)
-        col_g.markdown(f"<div style='text-align:center;color:{color}'>{pct}</div>", unsafe_allow_html=True)
-        if col_h.button(f"View ↓", key=f"btn_{tab_key}"):
-            st.session_state['active_tab'] = tab_key
-        st.markdown("<hr style='margin:4px 0;border-color:#252c3d'>", unsafe_allow_html=True)
-
-    # Column headers above the rows
-    st.markdown("""
-    <div style='display:grid;grid-template-columns:3fr 1.2fr 1.2fr 1.2fr 1.2fr 1.2fr 1.2fr 1.5fr;
-                gap:8px;padding:6px 0;margin-bottom:4px;border-bottom:2px solid #4f8eff'>
-        <span style='font-size:0.68rem;color:#4f8eff;text-transform:uppercase;letter-spacing:.1em;font-weight:700'>Category</span>
-        <span style='font-size:0.68rem;color:#4f8eff;text-align:center;display:block'>VL Total</span>
-        <span style='font-size:0.68rem;color:#4f8eff;text-align:center;display:block'>Matched</span>
-        <span style='font-size:0.68rem;color:#4f8eff;text-align:center;display:block'>VL Unmatch</span>
-        <span style='font-size:0.68rem;color:#4f8eff;text-align:center;display:block'>CL Total</span>
-        <span style='font-size:0.68rem;color:#4f8eff;text-align:center;display:block'>CL Unmatch</span>
-        <span style='font-size:0.68rem;color:#4f8eff;text-align:center;display:block'>Match %</span>
-        <span style='font-size:0.68rem;color:#4f8eff;text-align:center;display:block'>Annexure</span>
-    </div>
-    """, unsafe_allow_html=True)
+    rs1, rs2 = st.columns([3, 1])
+    for label, amount, row_type in recon_rows:
+        if row_type == "header":
+            bg, fg = "#1a3a6b", "#ffffff"
+        elif row_type == "total":
+            bg, fg = "#2a2a2a", "#e8ecf4"
+        elif row_type == "diff":
+            bg, fg = "#cc0000", "#ffffff"
+        elif row_type == "note":
+            bg, fg = "#cc0000", "#ffffff"
+        elif label == "Particular":
+            bg, fg = "#1c2130", "#4f8eff"
+        else:
+            bg, fg = "#141720", "#e8ecf4"
+        with rs1:
+            st.markdown(f"<div style='background:{bg};color:{fg};padding:6px 12px;border-bottom:1px solid #252c3d;font-size:0.82rem'>{label}</div>", unsafe_allow_html=True)
+        with rs2:
+            st.markdown(f"<div style='background:{bg};color:{fg};padding:6px 12px;border-bottom:1px solid #252c3d;font-size:0.82rem;text-align:right'>{amount}</div>", unsafe_allow_html=True)
 
     # ── DOWNLOAD ──
     st.markdown("---")
     try:
-        excel_data = build_excel(results, vl_ann_df, cl_ann_df)
+        excel_data = build_excel(results, vl_ann_df, cl_ann_df, VL, CL)
         st.download_button(
             label="⬇️  Download Full Reconciliation Report (.xlsx)",
             data=excel_data,
-            file_name=f"VendorSync_Reconciliation_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+            file_name=f"Recon_{VL}_{CL}_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
         )
@@ -1545,88 +1879,108 @@ def main():
         st.error(f"Error generating Excel: {e}")
     st.markdown("---")
 
-    # Determine which tab to show based on summary button clicks
-    tab_map = {'inv': 0, 'dn': 1, 'col': 2, 'rev_cross': 3, 'rev_int': 3, 'rev_un': 3}
-    default_tab = tab_map.get(st.session_state.get('active_tab', 'inv'), 0)
+    # Determine active tab from summary button clicks
+    tab_map = {'inv': 0, 'cn_match': 1, 'dn': 1, 'col': 2, 'rev_cross': 3, 'rev_int': 3, 'rev_un': 3}
 
-    # ── DETAIL TABS ──
-    tab_labels = ["🧾 Invoices", "📝 Debit Notes", "💰 Collections", "🔁 Reversals", "⚠️ All Unmatched"]
-    tabs = st.tabs(tab_labels)
+    tabs = st.tabs([
+        f"🧾 Invoices",
+        f"📝 DN / Credit Notes",
+        f"💰 Collections",
+        f"🔁 Reversals",
+        f"⚠️ All Unmatched",
+        f"📘 {VL} Ledger",
+        f"📗 {CL} Ledger",
+    ])
 
     with tabs[0]:
-        st.markdown('<a name="inv"></a>', unsafe_allow_html=True)
-        st.markdown('<span class="section-tag tag-matched">MATCHED INVOICES</span>', unsafe_allow_html=True)
+        st.markdown(f'<a name="inv"></a>', unsafe_allow_html=True)
+        st.markdown(f'<span class="section-tag tag-matched">MATCHED INVOICES — {VL} vs {CL}</span>', unsafe_allow_html=True)
         display_df(results['invoice_matched'])
         c1, c2 = st.columns(2)
         with c1:
-            st.markdown('<span class="section-tag tag-unmatched">UNMATCHED — VENDOR LEDGER</span>', unsafe_allow_html=True)
+            st.markdown(f'<span class="section-tag tag-vl">UNMATCHED — {VL} (VENDOR LEDGER)</span>', unsafe_allow_html=True)
             display_df(results['invoice_unmatched_vl'])
         with c2:
-            st.markdown('<span class="section-tag tag-unmatched">UNMATCHED — CUSTOMER LEDGER</span>', unsafe_allow_html=True)
+            st.markdown(f'<span class="section-tag tag-cl">UNMATCHED — {CL} (CUSTOMER LEDGER)</span>', unsafe_allow_html=True)
             display_df(results['invoice_unmatched_cl'])
 
     with tabs[1]:
-        st.markdown('<a name="dn"></a>', unsafe_allow_html=True)
-        # Credit Note matches (sub-section)
-        st.markdown('<span class="section-tag tag-blue">🟡 CREDIT NOTES MATCHED — vs DISCOUNT DN / PRN (Customer Ledger)</span>', unsafe_allow_html=True)
-        cn_matched_df = [r for r in results['dn_matched'] if 'Credit Note' in str(r.get('Match Type', ''))]
-        display_df(cn_matched_df)
+        st.markdown('<a name="cn_match"></a>', unsafe_allow_html=True)
+        st.markdown(f'<span class="section-tag tag-blue">🟡 CREDIT NOTES ({VL}) ↔ DISCOUNT DN / PRN ({CL})</span>', unsafe_allow_html=True)
+        display_df(cn_matched)
         st.markdown("---")
-        # Regular Debit Note matches
-        st.markdown('<span class="section-tag tag-matched">MATCHED DEBIT NOTES</span>', unsafe_allow_html=True)
-        dn_only_df = [r for r in results['dn_matched'] if 'Credit Note' not in str(r.get('Match Type', ''))]
-        display_df(dn_only_df)
+        st.markdown(f'<span class="section-tag tag-matched">MATCHED DEBIT NOTES</span>', unsafe_allow_html=True)
+        display_df(dn_only_matched)
         c1, c2 = st.columns(2)
         with c1:
-            st.markdown('<span class="section-tag tag-unmatched">UNMATCHED — VENDOR LEDGER</span>', unsafe_allow_html=True)
+            st.markdown(f'<span class="section-tag tag-vl">UNMATCHED DEBIT NOTES — {VL}</span>', unsafe_allow_html=True)
             display_df(results['dn_unmatched_vl'])
         with c2:
-            st.markdown('<span class="section-tag tag-unmatched">UNMATCHED — CUSTOMER LEDGER</span>', unsafe_allow_html=True)
+            st.markdown(f'<span class="section-tag tag-cl">UNMATCHED DEBIT NOTES — {CL}</span>', unsafe_allow_html=True)
             display_df(results['dn_unmatched_cl'])
 
     with tabs[2]:
         st.markdown('<a name="col"></a>', unsafe_allow_html=True)
-        st.markdown('<span class="section-tag tag-matched">MATCHED COLLECTIONS</span>', unsafe_allow_html=True)
+        st.markdown(f'<span class="section-tag tag-matched">MATCHED COLLECTIONS</span>', unsafe_allow_html=True)
         display_df(results['collection_matched'])
         c1, c2 = st.columns(2)
         with c1:
-            st.markdown('<span class="section-tag tag-unmatched">UNMATCHED — VENDOR LEDGER</span>', unsafe_allow_html=True)
+            st.markdown(f'<span class="section-tag tag-vl">UNMATCHED COLLECTIONS — {VL}</span>', unsafe_allow_html=True)
             display_df(results['collection_unmatched_vl'])
         with c2:
-            st.markdown('<span class="section-tag tag-unmatched">UNMATCHED — CUSTOMER LEDGER</span>', unsafe_allow_html=True)
+            st.markdown(f'<span class="section-tag tag-cl">UNMATCHED COLLECTIONS — {CL}</span>', unsafe_allow_html=True)
             display_df(results['collection_unmatched_cl'])
 
     with tabs[3]:
         st.markdown('<a name="rev_cross"></a>', unsafe_allow_html=True)
-        # ── Annexure A: Reversed in VL AND present in CL ──
-        st.markdown('<span class="section-tag tag-partial">⚠️ ANNEXURE A — REVERSED IN VL | INVOICE ALSO IN CUSTOMER LEDGER</span>', unsafe_allow_html=True)
-        st.caption("These invoices were reversed in the Vendor Ledger but the original invoice also exists in the Customer Ledger. Needs review — customer may not be aware of the reversal.")
+        st.markdown(f'<span class="section-tag tag-partial">⚠️ ANNEXURE A — REVERSED IN {VL} | INVOICE ALSO IN {CL}</span>', unsafe_allow_html=True)
+        st.caption(f"These invoices were reversed in {VL} but the original invoice also exists in {CL}. Needs review.")
         display_df(results['reversal_cross_ledger'])
-
         st.markdown("---")
         st.markdown('<a name="rev_int"></a>', unsafe_allow_html=True)
-
-        # ── Annexure B: Pure VL internal reversal ──
-        st.markdown('<span class="section-tag tag-matched">✅ ANNEXURE B — REVERSED IN VL | NOT IN CUSTOMER LEDGER</span>', unsafe_allow_html=True)
-        st.caption("Original invoice and its reversal both exist only in Vendor Ledger. No cross-ledger impact.")
+        st.markdown(f'<span class="section-tag tag-matched">✅ ANNEXURE B — REVERSED IN {VL} | NOT IN {CL}</span>', unsafe_allow_html=True)
         display_df(results['reversal_vl_internal'])
-
         st.markdown("---")
         st.markdown('<a name="rev_un"></a>', unsafe_allow_html=True)
-
-        # ── Annexure C: Reversal with no original found ──
-        st.markdown('<span class="section-tag tag-unmatched">❓ ANNEXURE C — REVERSAL ENTRY | ORIGINAL NOT FOUND / AMOUNT MISMATCH</span>', unsafe_allow_html=True)
-        st.caption("Reversal entries where the original invoice could not be found in VL, or the amount did not match.")
-        display_df(results['reversal_unmatched'])
+        # Split Annexure C into Amount Mismatch and Missing
+        rev_mis = [r for r in results['reversal_unmatched'] if r.get('Reason','') == 'Amount Mismatch']
+        rev_miss = [r for r in results['reversal_unmatched'] if r.get('Reason','') != 'Amount Mismatch']
+        st.markdown(f'<span class="section-tag tag-unmatched">❌ ANNEXURE C1 — REVERSAL | AMOUNT MISMATCH ({len(rev_mis)} items)</span>', unsafe_allow_html=True)
+        st.caption("Reversal found in VL but amounts do not match. VL Reversal Amount and Original Amount shown separately.")
+        display_df(rev_mis)
+        st.markdown(f'<span class="section-tag tag-unmatched">❌ ANNEXURE C2 — REVERSAL | ORIGINAL NOT FOUND ({len(rev_miss)} items)</span>', unsafe_allow_html=True)
+        display_df(rev_miss)
 
     with tabs[4]:
         all_unmatched = []
         for item in results['invoice_unmatched_vl'] + results['dn_unmatched_vl'] + results['collection_unmatched_vl']:
-            item = dict(item); item['Ledger'] = 'Vendor'; all_unmatched.append(item)
+            item = dict(item); item['Ledger'] = VL; all_unmatched.append(item)
         for item in results['invoice_unmatched_cl'] + results['dn_unmatched_cl'] + results['collection_unmatched_cl']:
-            item = dict(item); item['Ledger'] = 'Customer'; all_unmatched.append(item)
-        st.markdown('<span class="section-tag tag-unmatched">ALL UNMATCHED ITEMS</span>', unsafe_allow_html=True)
+            item = dict(item); item['Ledger'] = CL; all_unmatched.append(item)
+        st.markdown(f'<span class="section-tag tag-unmatched">ALL UNMATCHED ITEMS — {VL} & {CL}</span>', unsafe_allow_html=True)
         display_df(all_unmatched)
+
+    with tabs[5]:
+        st.markdown(f'<span class="section-tag tag-vl">📘 {VL} — VENDOR LEDGER WITH REMARKS</span>', unsafe_allow_html=True)
+        st.caption(f"🟢 Green = Matched | 🔴 Red = Unmatched | 🟡 Yellow = Reversal")
+        if not vl_ann_df.empty:
+            disp = vl_ann_df.copy()
+            for col in disp.columns:
+                if 'date' in col.lower():
+                    disp[col] = pd.to_datetime(disp[col], errors='coerce').dt.strftime('%d-%b-%Y').fillna('')
+            st.dataframe(disp, use_container_width=True, hide_index=True)
+            if vl_closing_val:
+                st.info(f"**{VL} Closing Balance: {fmt_inr(vl_closing_val)}**")
+
+    with tabs[6]:
+        st.markdown(f'<span class="section-tag tag-cl">📗 {CL} — CUSTOMER LEDGER WITH REMARKS</span>', unsafe_allow_html=True)
+        st.caption(f"🟢 Green = Matched | 🔴 Red = Unmatched")
+        if not cl_ann_df.empty:
+            disp = cl_ann_df.copy()
+            for col in disp.columns:
+                if 'date' in col.lower():
+                    disp[col] = pd.to_datetime(disp[col], errors='coerce').dt.strftime('%d-%b-%Y').fillna('')
+            st.dataframe(disp, use_container_width=True, hide_index=True)
 
 
 if __name__ == "__main__":
