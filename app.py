@@ -53,14 +53,12 @@ html, body, [class*="css"] {
 .main { background: var(--bg) !important; }
 .block-container { padding: 1.5rem 2rem !important; max-width: 1400px; }
 
-/* Sidebar */
 [data-testid="stSidebar"] {
     background: var(--surface) !important;
     border-right: 1px solid var(--border);
 }
 [data-testid="stSidebar"] * { color: var(--text) !important; }
 
-/* Header */
 .recon-header {
     display: flex;
     align-items: center;
@@ -85,7 +83,6 @@ html, body, [class*="css"] {
     letter-spacing: 0.12em;
 }
 
-/* Stat cards */
 .stat-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem; margin-bottom: 1.5rem; }
 .stat-card {
     background: var(--surface);
@@ -113,7 +110,36 @@ html, body, [class*="css"] {
 .stat-card.total .stat-value { color: var(--accent); }
 .stat-sub { font-size: 0.7rem; color: var(--muted); }
 
-/* Tabs */
+/* Summary table */
+.summary-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.82rem;
+    margin-bottom: 1.5rem;
+}
+.summary-table th {
+    background: var(--surface2);
+    color: var(--accent);
+    padding: 10px 14px;
+    text-align: left;
+    border-bottom: 2px solid var(--border);
+    font-family: 'Syne', sans-serif;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-size: 0.7rem;
+}
+.summary-table td {
+    padding: 9px 14px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text);
+}
+.summary-table tr:hover td { background: var(--surface2); }
+.summary-table .num { text-align: right; font-weight: 600; }
+.summary-table .matched-val { color: var(--accent2); }
+.summary-table .unmatched-val { color: var(--danger); }
+.summary-table .total-row td { background: var(--surface2); font-weight: 700; border-top: 2px solid var(--border); }
+
 .stTabs [data-baseweb="tab-list"] {
     background: var(--surface) !important;
     border-radius: 8px;
@@ -135,10 +161,8 @@ html, body, [class*="css"] {
     color: var(--text) !important;
 }
 
-/* Dataframes */
 [data-testid="stDataFrame"] { border-radius: 8px; overflow: hidden; }
 
-/* Buttons */
 .stButton > button {
     font-family: 'Syne', sans-serif !important;
     font-weight: 700 !important;
@@ -151,7 +175,6 @@ html, body, [class*="css"] {
 }
 .stButton > button:hover { opacity: 0.88 !important; transform: translateY(-1px); }
 
-/* Download button */
 .stDownloadButton > button {
     font-family: 'Syne', sans-serif !important;
     font-weight: 600 !important;
@@ -161,14 +184,12 @@ html, body, [class*="css"] {
     border-radius: 8px !important;
 }
 
-/* Upload area */
 [data-testid="stFileUploader"] {
     background: var(--surface) !important;
     border: 1px dashed var(--border) !important;
     border-radius: 10px !important;
 }
 
-/* Section headers */
 .section-tag {
     display: inline-block;
     font-family: 'Syne', sans-serif;
@@ -185,7 +206,6 @@ html, body, [class*="css"] {
 .tag-partial { background: var(--partial); color: var(--warn); border: 1px solid var(--partial-border); }
 .tag-blue { background: #4f8eff22; color: var(--accent); border: 1px solid #4f8eff55; }
 
-/* Info boxes */
 .info-box {
     background: var(--surface);
     border: 1px solid var(--border);
@@ -197,17 +217,14 @@ html, body, [class*="css"] {
     margin-bottom: 1rem;
 }
 
-/* Alert */
 [data-testid="stAlert"] { border-radius: 8px !important; }
 
-/* Selectbox, multiselect */
 [data-testid="stSelectbox"] > div, [data-testid="stMultiSelect"] > div {
     background: var(--surface) !important;
     border-color: var(--border) !important;
     border-radius: 8px !important;
 }
 
-/* Number input */
 [data-testid="stNumberInput"] input {
     background: var(--surface) !important;
     border-color: var(--border) !important;
@@ -215,7 +232,6 @@ html, body, [class*="css"] {
     border-radius: 8px !important;
 }
 
-/* Expander */
 [data-testid="stExpander"] {
     background: var(--surface) !important;
     border: 1px solid var(--border) !important;
@@ -229,7 +245,6 @@ html, body, [class*="css"] {
 # ─────────────────────────────────────────────
 
 def clean_doc_number(val):
-    """Normalize document numbers for comparison."""
     if pd.isna(val):
         return ""
     s = str(val).strip().upper()
@@ -237,7 +252,6 @@ def clean_doc_number(val):
     return s
 
 def extract_utr(val):
-    """Extract UTR number from a string."""
     if pd.isna(val):
         return ""
     s = str(val).strip().upper()
@@ -247,41 +261,56 @@ def extract_utr(val):
     return s
 
 def get_period(dt):
-    """Return YYYY-MM string for period matching."""
     try:
         return pd.to_datetime(dt).strftime('%Y-%m')
     except:
         return ""
 
 def round_amount(val, decimals=2):
-    """Round to avoid floating-point noise."""
     try:
         return round(float(val), decimals)
     except:
         return 0.0
 
 def is_debit_note(doc_type):
-    """Detect if a row is a debit note."""
     if pd.isna(doc_type):
         return False
     s = str(doc_type).upper()
     return any(k in s for k in ['DEBIT NOTE', 'DN', 'DEBIT MEMO', 'DM', 'CREDIT MEMO', 'CM'])
 
+def is_reversal_type(doc_type):
+    """Detect Complete Reversal or Saleable Return doc types."""
+    if pd.isna(doc_type):
+        return False
+    s = str(doc_type).upper()
+    return any(k in s for k in [
+        'COMPLETE REVERSAL', 'REVERSAL', 'SALEABLE RETURN',
+        'SALES RETURN', 'RETURN', 'CANCELLATION', 'CANCEL', 'REVERSED'
+    ])
+
 def is_collection(doc_type, particulars=""):
-    """Detect if a row is a payment/collection."""
     if pd.isna(doc_type):
         doc_type = ""
     s = str(doc_type).upper() + " " + str(particulars).upper()
     return any(k in s for k in ['PAYMENT', 'RECEIPT', 'COLLECTION', 'NEFT', 'RTGS', 'IMPS', 'CHEQUE', 'CHQ', 'TDS', 'BANK', 'UTR'])
+
+def extract_ref_from_particulars(particulars):
+    """Extract referenced invoice number from particulars column."""
+    if pd.isna(particulars):
+        return ""
+    s = str(particulars).strip().upper()
+    # Remove common prefix words
+    s = re.sub(r'(REVERSAL OF|AGAINST|REF|REFERENCE|RETURN OF|CANCELLATION OF|REVERSED)\s*', '', s)
+    # Clean up
+    s = re.sub(r'[\s\-_/]', '', s)
+    return s.strip()
 
 # ─────────────────────────────────────────────
 # LOAD & PARSE
 # ─────────────────────────────────────────────
 
 def load_vendor_ledger(file):
-    """Parse vendor ledger Excel."""
     df = pd.read_excel(file, header=None)
-    # Find header row
     header_row = None
     for i, row in df.iterrows():
         vals = [str(v).lower() for v in row if not pd.isna(v)]
@@ -301,7 +330,6 @@ def load_vendor_ledger(file):
     df = df.iloc[header_row + 1:].reset_index(drop=True)
     df.columns = [str(c).strip() for c in df.columns]
 
-    # Normalize column names
     col_map = {}
     for c in df.columns:
         cl = c.lower()
@@ -323,7 +351,7 @@ def load_vendor_ledger(file):
             col_map[c] = 'closing'
     df = df.rename(columns=col_map)
 
-    needed = ['doc_date', 'doc_no', 'doc_type', 'debit', 'credit']
+    needed = ['doc_date', 'doc_no', 'doc_type', 'debit', 'credit', 'particulars']
     for col in needed:
         if col not in df.columns:
             df[col] = np.nan
@@ -333,13 +361,15 @@ def load_vendor_ledger(file):
     df['credit'] = pd.to_numeric(df['credit'], errors='coerce').fillna(0)
     df['doc_no_clean'] = df['doc_no'].apply(clean_doc_number)
     df['period'] = df['doc_date'].apply(get_period)
+    df['particulars_ref'] = df['particulars'].apply(extract_ref_from_particulars)
     df = df[df['doc_no_clean'] != ''].reset_index(drop=True)
     df['_idx'] = df.index
+    df['_remark'] = ''
+    df['_match_ref'] = ''
     return df
 
 
 def load_customer_ledger(file):
-    """Parse customer ledger Excel."""
     df = pd.read_excel(file, header=None)
     header_row = None
     for i, row in df.iterrows():
@@ -381,21 +411,15 @@ def load_customer_ledger(file):
     df['period'] = df['doc_date'].apply(get_period)
     df = df[df['doc_no_clean'] != ''].reset_index(drop=True)
     df['_idx'] = df.index
+    df['_remark'] = ''
+    df['_match_ref'] = ''
     return df
 
 # ─────────────────────────────────────────────
 # RECONCILIATION ENGINE
 # ─────────────────────────────────────────────
 
-def run_reconciliation(vl, cl, tolerance=1.0):
-    """
-    Main reconciliation logic:
-    1. Exclude fully-reversed invoices from vendor ledger
-    2. Match invoices by document number
-    3. Match debit notes by doc number, then by period+amount
-    4. Match collections by UTR or period+amount
-    5. Report all unmatched items
-    """
+def run_reconciliation(vl_orig, cl_orig, tolerance=1.0):
     results = {
         'invoice_matched': [],
         'invoice_unmatched_vl': [],
@@ -406,38 +430,95 @@ def run_reconciliation(vl, cl, tolerance=1.0):
         'collection_matched': [],
         'collection_unmatched_vl': [],
         'collection_unmatched_cl': [],
-        'reversed_excluded': [],
+        'reversal_matched': [],
+        'reversal_unmatched': [],
     }
 
-    vl = vl.copy()
-    cl = cl.copy()
+    vl = vl_orig.copy()
+    cl = cl_orig.copy()
     vl['_matched'] = False
     cl['_matched'] = False
 
-    # ── STEP 1: Identify & exclude fully-reversed invoices in vendor ledger ──
-    # A reversal = same doc_no appears with both positive credit and a reversal entry
-    vl_invoices_raw = vl[~vl['doc_type'].apply(is_debit_note) & ~vl['doc_type'].apply(lambda x: is_collection(x))].copy()
-    doc_groups = vl_invoices_raw.groupby('doc_no_clean')
-    reversed_docs = set()
-    for doc_no, grp in doc_groups:
-        total_credit = grp['credit'].sum()
-        total_debit = grp['debit'].sum()
-        # If debit == credit (net zero) → fully reversed
-        if abs(total_credit - total_debit) < tolerance and len(grp) > 1:
-            reversed_docs.add(doc_no)
-            results['reversed_excluded'].extend(grp.to_dict('records'))
-            vl.loc[grp.index, '_matched'] = True  # exclude from further matching
+    # ── STEP 1: Handle Reversal entries in Vendor Ledger ──
+    # These are rows with doc_type = Complete Reversal / Saleable Return
+    # They reference original invoice in the Particulars column
+    vl_reversals = vl[vl['doc_type'].apply(is_reversal_type)].copy()
+
+    for idx, rev_row in vl_reversals.iterrows():
+        ref = rev_row.get('particulars_ref', '')
+        doc_no = rev_row.get('doc_no_clean', '')
+
+        # Find the original invoice in VL being reversed (by particulars ref or doc_no)
+        orig_candidates = vl[
+            (~vl['_matched']) &
+            (~vl['doc_type'].apply(is_reversal_type)) &
+            (~vl['doc_type'].apply(is_debit_note)) &
+            (~vl['doc_type'].apply(lambda x: is_collection(x))) &
+            ((vl['doc_no_clean'] == ref) | (vl['doc_no_clean'] == doc_no))
+        ]
+
+        if not orig_candidates.empty:
+            orig_row = orig_candidates.iloc[0]
+            # Mark both the original and reversal as matched (reversed pair)
+            vl.at[orig_row['_idx'], '_matched'] = True
+            vl.at[orig_row['_idx'], '_remark'] = 'Matched - Reversed'
+            vl.at[orig_row['_idx'], '_match_ref'] = str(rev_row.get('doc_no', ''))
+            vl.at[idx, '_matched'] = True
+            vl.at[idx, '_remark'] = 'Matched - Reversal Entry'
+            vl.at[idx, '_match_ref'] = str(orig_row.get('doc_no', ''))
+
+            results['reversal_matched'].append({
+                'Original Doc No': orig_row.get('doc_no', ''),
+                'Original Date': orig_row.get('doc_date', ''),
+                'Original Type': orig_row.get('doc_type', ''),
+                'Original Debit': orig_row.get('debit', 0),
+                'Original Credit': orig_row.get('credit', 0),
+                'Reversal Doc No': rev_row.get('doc_no', ''),
+                'Reversal Date': rev_row.get('doc_date', ''),
+                'Reversal Type': rev_row.get('doc_type', ''),
+                'Reversal Debit': rev_row.get('debit', 0),
+                'Reversal Credit': rev_row.get('credit', 0),
+                'Particulars': rev_row.get('particulars', ''),
+                'Remark': 'Reversed & Reconciled',
+            })
+        else:
+            # Reversal with no matching original — mark as unmatched
+            vl.at[idx, '_matched'] = True  # exclude from further matching
+            vl.at[idx, '_remark'] = 'Unmatched - Reversal (No Original Found)'
+            results['reversal_unmatched'].append({
+                'Doc No': rev_row.get('doc_no', ''),
+                'Date': rev_row.get('doc_date', ''),
+                'Type': rev_row.get('doc_type', ''),
+                'Particulars': rev_row.get('particulars', ''),
+                'Debit': rev_row.get('debit', 0),
+                'Credit': rev_row.get('credit', 0),
+                'Remark': 'Reversal Entry - Original Not Found',
+            })
 
     # ── STEP 2: Match Invoices by Document Number ──
-    vl_inv = vl[(~vl['_matched']) & (~vl['doc_type'].apply(is_debit_note)) & (~vl['doc_type'].apply(lambda x: is_collection(x, '')))].copy()
-    cl_inv = cl[(~cl['_matched']) & (~cl['doc_type'].apply(is_debit_note)) & (~cl['doc_type'].apply(lambda x: is_collection(x, '')))].copy()
+    vl_inv = vl[
+        (~vl['_matched']) &
+        (~vl['doc_type'].apply(is_debit_note)) &
+        (~vl['doc_type'].apply(lambda x: is_collection(x, ''))) &
+        (~vl['doc_type'].apply(is_reversal_type))
+    ].copy()
+
+    cl_inv = cl[
+        (~cl['_matched']) &
+        (~cl['doc_type'].apply(is_debit_note)) &
+        (~cl['doc_type'].apply(lambda x: is_collection(x, '')))
+    ].copy()
 
     for idx, vrow in vl_inv.iterrows():
         matches = cl_inv[(cl_inv['doc_no_clean'] == vrow['doc_no_clean']) & (~cl_inv['_matched'])]
         if not matches.empty:
             crow = matches.iloc[0]
             vl.at[idx, '_matched'] = True
+            vl.at[idx, '_remark'] = 'Matched'
+            vl.at[idx, '_match_ref'] = str(crow.get('doc_no', ''))
             cl.at[crow['_idx'], '_matched'] = True
+            cl.at[crow['_idx'], '_remark'] = 'Matched'
+            cl.at[crow['_idx'], '_match_ref'] = str(vrow.get('doc_no', ''))
             cl_inv.at[crow.name, '_matched'] = True
             results['invoice_matched'].append({
                 'VL Doc No': vrow.get('doc_no', ''),
@@ -452,6 +533,7 @@ def run_reconciliation(vl, cl, tolerance=1.0):
                 'CL Credit': crow.get('credit', 0),
                 'Match Basis': 'Document Number',
                 'Match Type': 'Invoice',
+                'Remark': 'Matched',
             })
 
     # ── STEP 3: Match Debit Notes ──
@@ -460,14 +542,13 @@ def run_reconciliation(vl, cl, tolerance=1.0):
 
     for idx, vrow in vl_dn.iterrows():
         matched = False
-        # 3a: by doc number
+        basis = ''
         doc_matches = cl_dn[(cl_dn['doc_no_clean'] == vrow['doc_no_clean']) & (~cl_dn['_matched'])]
         if not doc_matches.empty:
             crow = doc_matches.iloc[0]
             matched = True
             basis = 'Document Number'
         else:
-            # 3b: by period + amount
             vamt = round_amount(vrow['debit'] + vrow['credit'])
             period_matches = cl_dn[
                 (cl_dn['period'] == vrow['period']) &
@@ -481,7 +562,11 @@ def run_reconciliation(vl, cl, tolerance=1.0):
 
         if matched:
             vl.at[idx, '_matched'] = True
+            vl.at[idx, '_remark'] = 'Matched'
+            vl.at[idx, '_match_ref'] = str(crow.get('doc_no', ''))
             cl.at[crow['_idx'], '_matched'] = True
+            cl.at[crow['_idx'], '_remark'] = 'Matched'
+            cl.at[crow['_idx'], '_match_ref'] = str(vrow.get('doc_no', ''))
             cl_dn.at[crow.name, '_matched'] = True
             results['dn_matched'].append({
                 'VL Doc No': vrow.get('doc_no', ''),
@@ -496,20 +581,19 @@ def run_reconciliation(vl, cl, tolerance=1.0):
                 'CL Credit': crow.get('credit', 0),
                 'Match Basis': basis,
                 'Match Type': 'Debit Note',
+                'Remark': 'Matched',
             })
 
-    # ── STEP 4: Match Collections by UTR or Period+Amount ──
+    # ── STEP 4: Match Collections ──
     vl_col = vl[(~vl['_matched']) & (vl['doc_type'].apply(lambda x: is_collection(x, '')))].copy()
     cl_col = cl[(~cl['_matched']) & (cl['doc_type'].apply(lambda x: is_collection(x, '')))].copy()
 
-    # Add UTR column
     vl_col['utr'] = vl_col.apply(lambda r: extract_utr(str(r.get('particulars', '')) + ' ' + str(r.get('doc_no', ''))), axis=1)
     cl_col['utr'] = cl_col.apply(lambda r: extract_utr(str(r.get('doc_no', '')) + ' ' + str(r.get('doc_type', ''))), axis=1)
 
     for idx, vrow in vl_col.iterrows():
         matched = False
         basis = ''
-        # 4a: by UTR
         if vrow['utr']:
             utr_matches = cl_col[(cl_col['utr'] == vrow['utr']) & (cl_col['utr'] != '') & (~cl_col['_matched'])]
             if not utr_matches.empty:
@@ -518,7 +602,6 @@ def run_reconciliation(vl, cl, tolerance=1.0):
                 basis = 'UTR Number'
 
         if not matched:
-            # 4b: by period + amount
             vamt = round_amount(vrow['debit'] + vrow['credit'])
             amt_matches = cl_col[
                 (cl_col['period'] == vrow['period']) &
@@ -532,7 +615,11 @@ def run_reconciliation(vl, cl, tolerance=1.0):
 
         if matched:
             vl.at[idx, '_matched'] = True
+            vl.at[idx, '_remark'] = 'Matched'
+            vl.at[idx, '_match_ref'] = str(crow.get('doc_no', ''))
             cl.at[crow['_idx'], '_matched'] = True
+            cl.at[crow['_idx'], '_remark'] = 'Matched'
+            cl.at[crow['_idx'], '_match_ref'] = str(vrow.get('doc_no', ''))
             cl_col.at[crow.name, '_matched'] = True
             results['collection_matched'].append({
                 'VL Doc No': vrow.get('doc_no', ''),
@@ -547,13 +634,15 @@ def run_reconciliation(vl, cl, tolerance=1.0):
                 'CL UTR': crow.get('utr', ''),
                 'Match Basis': basis,
                 'Match Type': 'Collection',
+                'Remark': 'Matched',
             })
 
-    # ── STEP 5: Collect all unmatched ──
+    # ── STEP 5: Mark remaining unmatched ──
     unmatched_vl = vl[~vl['_matched']]
     unmatched_cl = cl[~cl['_matched']]
 
-    for _, r in unmatched_vl.iterrows():
+    for idx, r in unmatched_vl.iterrows():
+        vl.at[idx, '_remark'] = 'Unmatched'
         entry = {
             'Doc No': r.get('doc_no', ''),
             'Date': r.get('doc_date', ''),
@@ -562,6 +651,7 @@ def run_reconciliation(vl, cl, tolerance=1.0):
             'Debit': r.get('debit', 0),
             'Credit': r.get('credit', 0),
             'Source': 'Vendor Ledger',
+            'Remark': 'Unmatched',
         }
         if is_debit_note(r.get('doc_type', '')):
             results['dn_unmatched_vl'].append(entry)
@@ -570,7 +660,8 @@ def run_reconciliation(vl, cl, tolerance=1.0):
         else:
             results['invoice_unmatched_vl'].append(entry)
 
-    for _, r in unmatched_cl.iterrows():
+    for idx, r in unmatched_cl.iterrows():
+        cl.at[idx, '_remark'] = 'Unmatched'
         entry = {
             'Doc No': r.get('doc_no', ''),
             'Date': r.get('doc_date', ''),
@@ -578,6 +669,7 @@ def run_reconciliation(vl, cl, tolerance=1.0):
             'Debit': r.get('debit', 0),
             'Credit': r.get('credit', 0),
             'Source': 'Customer Ledger',
+            'Remark': 'Unmatched',
         }
         if is_debit_note(r.get('doc_type', '')):
             results['dn_unmatched_cl'].append(entry)
@@ -586,23 +678,29 @@ def run_reconciliation(vl, cl, tolerance=1.0):
         else:
             results['invoice_unmatched_cl'].append(entry)
 
+    # Store annotated ledgers for the "Ledger with Remarks" sheets
+    results['vl_annotated'] = vl
+    results['cl_annotated'] = cl
+
     return results
 
 # ─────────────────────────────────────────────
-# EXCEL EXPORT
+# EXCEL EXPORT — with Vendor & Customer Ledger tabs + Remarks
 # ─────────────────────────────────────────────
 
-def build_excel(results):
+def build_excel(results, vl_orig, cl_orig):
     output = BytesIO()
     wb = openpyxl.Workbook()
 
     COLORS = {
-        'header_bg': '1C2130',
-        'header_fg': 'E8ECF4',
-        'matched': 'D4F5EE',
-        'unmatched': 'FFE5EA',
-        'partial': 'FFF3E5',
-        'reversed': 'F0F0F0',
+        'matched_fill': 'C6EFCE',       # green
+        'unmatched_fill': 'FFC7CE',     # red
+        'reversal_fill': 'FFEB9C',      # orange/yellow
+        'header_dark': '1C2130',
+        'header_green': '1A6B45',
+        'header_red': 'A32035',
+        'header_orange': 'B85C00',
+        'header_blue': '1A3A6B',
         'alt_row': 'F8F9FB',
         'border': 'D0D5E0',
     }
@@ -619,17 +717,15 @@ def build_excel(results):
             cell.border = border
         ws.row_dimensions[row].height = 30
 
-    def style_data(ws, start_row, end_row, ncols, row_color=None):
-        for r in range(start_row, end_row + 1):
-            fill_color = row_color if row_color else (COLORS['alt_row'] if r % 2 == 0 else 'FFFFFF')
-            for c in range(1, ncols + 1):
-                cell = ws.cell(row=r, column=c)
-                cell.fill = PatternFill(fill_type='solid', fgColor=fill_color)
-                cell.border = border
-                cell.alignment = Alignment(vertical='center')
-                cell.font = Font(name='Calibri', size=9)
+    def style_row(ws, row_num, ncols, fill_color):
+        for c in range(1, ncols + 1):
+            cell = ws.cell(row=row_num, column=c)
+            cell.fill = PatternFill(fill_type='solid', fgColor=fill_color)
+            cell.border = border
+            cell.alignment = Alignment(vertical='center')
+            cell.font = Font(name='Calibri', size=9)
 
-    def auto_width(ws, min_w=10, max_w=40):
+    def auto_width(ws, min_w=10, max_w=45):
         for col in ws.columns:
             max_len = 0
             for cell in col:
@@ -639,42 +735,201 @@ def build_excel(results):
                     pass
             ws.column_dimensions[get_column_letter(col[0].column)].width = min(max_w, max(min_w, max_len + 2))
 
-    # ── Summary Sheet ──
-    ws = wb.active
-    ws.title = 'Summary'
-    ws.sheet_view.showGridLines = False
-    ws.freeze_panes = 'A2'
+    def fmt_date(val):
+        try:
+            if pd.isna(val):
+                return ''
+            return pd.to_datetime(val).strftime('%d-%b-%Y')
+        except:
+            return str(val)
 
-    summary_data = [
-        ['Category', 'Matched', 'Unmatched (VL)', 'Unmatched (CL)', 'Total VL', 'Total CL'],
-        ['Invoices',
-         len(results['invoice_matched']),
-         len(results['invoice_unmatched_vl']),
-         len(results['invoice_unmatched_cl']),
-         len(results['invoice_matched']) + len(results['invoice_unmatched_vl']),
-         len(results['invoice_matched']) + len(results['invoice_unmatched_cl'])],
-        ['Debit Notes',
-         len(results['dn_matched']),
-         len(results['dn_unmatched_vl']),
-         len(results['dn_unmatched_cl']),
-         len(results['dn_matched']) + len(results['dn_unmatched_vl']),
-         len(results['dn_matched']) + len(results['dn_unmatched_cl'])],
-        ['Collections',
-         len(results['collection_matched']),
-         len(results['collection_unmatched_vl']),
-         len(results['collection_unmatched_cl']),
-         len(results['collection_matched']) + len(results['collection_unmatched_vl']),
-         len(results['collection_matched']) + len(results['collection_unmatched_cl'])],
-        ['Reversed (Excluded)', len(results['reversed_excluded']), '', '', len(results['reversed_excluded']), ''],
+    def write_cell(ws, row, col, val):
+        cell = ws.cell(row=row, column=col)
+        if isinstance(val, (pd.Timestamp, datetime)):
+            cell.value = fmt_date(val)
+        elif isinstance(val, float) and not pd.isna(val):
+            cell.value = round(val, 2)
+            cell.number_format = '#,##0.00'
+        elif pd.isna(val) if not isinstance(val, str) else False:
+            cell.value = ''
+        else:
+            cell.value = val
+        return cell
+
+    # ══════════════════════════════════════════
+    # SHEET 1: SUMMARY
+    # ══════════════════════════════════════════
+    ws_sum = wb.active
+    ws_sum.title = 'Summary'
+    ws_sum.sheet_view.showGridLines = False
+
+    # Title
+    ws_sum.merge_cells('A1:H1')
+    title_cell = ws_sum['A1']
+    title_cell.value = '⚖️ VENDOR RECONCILIATION SUMMARY'
+    title_cell.font = Font(bold=True, size=14, color='FFFFFF', name='Calibri')
+    title_cell.fill = PatternFill(fill_type='solid', fgColor='1C2130')
+    title_cell.alignment = Alignment(horizontal='center', vertical='center')
+    ws_sum.row_dimensions[1].height = 35
+
+    ws_sum['A2'].value = f'Generated on: {datetime.now().strftime("%d-%b-%Y %H:%M")}'
+    ws_sum['A2'].font = Font(italic=True, size=9, color='888888')
+    ws_sum.row_dimensions[2].height = 18
+
+    # Section: Reconciliation Overview
+    headers = ['Category', 'Total (VL)', 'Matched', 'Unmatched (VL)', 'Total (CL)', 'Matched', 'Unmatched (CL)', 'Remarks']
+    style_header(ws_sum, headers, row=4, color='1A3A6B')
+
+    inv_vl_total = len(results['invoice_matched']) + len(results['invoice_unmatched_vl'])
+    inv_cl_total = len(results['invoice_matched']) + len(results['invoice_unmatched_cl'])
+    dn_vl_total = len(results['dn_matched']) + len(results['dn_unmatched_vl'])
+    dn_cl_total = len(results['dn_matched']) + len(results['dn_unmatched_cl'])
+    col_vl_total = len(results['collection_matched']) + len(results['collection_unmatched_vl'])
+    col_cl_total = len(results['collection_matched']) + len(results['collection_unmatched_cl'])
+
+    summary_rows = [
+        ['Invoices', inv_vl_total, len(results['invoice_matched']), len(results['invoice_unmatched_vl']),
+         inv_cl_total, len(results['invoice_matched']), len(results['invoice_unmatched_cl']), 'Matched by Document Number'],
+        ['Debit Notes', dn_vl_total, len(results['dn_matched']), len(results['dn_unmatched_vl']),
+         dn_cl_total, len(results['dn_matched']), len(results['dn_unmatched_cl']), 'Matched by Doc No / Period+Amount'],
+        ['Collections', col_vl_total, len(results['collection_matched']), len(results['collection_unmatched_vl']),
+         col_cl_total, len(results['collection_matched']), len(results['collection_unmatched_cl']), 'Matched by UTR / Period+Amount'],
+        ['Reversals (VL)', len(results['reversal_matched']) * 2 + len(results['reversal_unmatched']),
+         len(results['reversal_matched']), len(results['reversal_unmatched']),
+         '-', '-', '-', 'Complete Reversal / Saleable Return'],
     ]
-    for r, row in enumerate(summary_data, 1):
-        for c, val in enumerate(row, 1):
-            ws.cell(row=r, column=c, value=val)
-    style_header(ws, summary_data[0], row=1)
-    style_data(ws, 2, len(summary_data), len(summary_data[0]))
-    auto_width(ws)
 
-    # ── Helper to write a sheet ──
+    row_colors = ['FFFFFF', 'F8F9FB', 'FFFFFF', 'FFF9E6']
+    for r_idx, row_data in enumerate(summary_rows, 5):
+        fill = row_colors[r_idx - 5]
+        for c_idx, val in enumerate(row_data, 1):
+            cell = ws_sum.cell(row=r_idx, column=c_idx, value=val)
+            cell.fill = PatternFill(fill_type='solid', fgColor=fill)
+            cell.border = border
+            cell.font = Font(name='Calibri', size=10)
+            cell.alignment = Alignment(vertical='center')
+            if c_idx in [3, 6]:  # matched cols - green
+                cell.font = Font(name='Calibri', size=10, color='1A6B45', bold=True)
+            if c_idx in [4, 7]:  # unmatched cols - red
+                cell.font = Font(name='Calibri', size=10, color='A32035', bold=True)
+        ws_sum.row_dimensions[r_idx].height = 22
+
+    # Total row
+    total_row = r_idx + 1
+    totals = [
+        'TOTAL',
+        inv_vl_total + dn_vl_total + col_vl_total,
+        len(results['invoice_matched']) + len(results['dn_matched']) + len(results['collection_matched']),
+        len(results['invoice_unmatched_vl']) + len(results['dn_unmatched_vl']) + len(results['collection_unmatched_vl']),
+        inv_cl_total + dn_cl_total + col_cl_total,
+        len(results['invoice_matched']) + len(results['dn_matched']) + len(results['collection_matched']),
+        len(results['invoice_unmatched_cl']) + len(results['dn_unmatched_cl']) + len(results['collection_unmatched_cl']),
+        '',
+    ]
+    for c_idx, val in enumerate(totals, 1):
+        cell = ws_sum.cell(row=total_row, column=c_idx, value=val)
+        cell.fill = PatternFill(fill_type='solid', fgColor='1C2130')
+        cell.font = Font(bold=True, color='FFFFFF', name='Calibri', size=10)
+        cell.border = border
+        cell.alignment = Alignment(horizontal='center', vertical='center')
+    ws_sum.row_dimensions[total_row].height = 25
+
+    # Match % row
+    pct_row = total_row + 1
+    vl_match_pct = round(totals[2] / totals[1] * 100, 1) if totals[1] else 0
+    cl_match_pct = round(totals[5] / totals[4] * 100, 1) if totals[4] else 0
+    ws_sum.cell(row=pct_row, column=1, value='Match Rate')
+    ws_sum.cell(row=pct_row, column=3, value=f'{vl_match_pct}%')
+    ws_sum.cell(row=pct_row, column=6, value=f'{cl_match_pct}%')
+    for c in [1, 3, 6]:
+        cell = ws_sum.cell(row=pct_row, column=c)
+        cell.font = Font(bold=True, color='1A6B45', name='Calibri', size=11)
+        cell.fill = PatternFill(fill_type='solid', fgColor='E8F5EE')
+        cell.border = border
+        cell.alignment = Alignment(horizontal='center', vertical='center')
+    ws_sum.row_dimensions[pct_row].height = 22
+
+    auto_width(ws_sum)
+
+    # ══════════════════════════════════════════
+    # SHEET 2: VENDOR LEDGER WITH REMARKS
+    # ══════════════════════════════════════════
+    vl_ann = results['vl_annotated']
+    ws_vl = wb.create_sheet('Vendor Ledger')
+    ws_vl.sheet_view.showGridLines = False
+    ws_vl.freeze_panes = 'A2'
+
+    # Choose display columns
+    vl_display_cols = ['doc_date', 'doc_no', 'doc_type', 'particulars', 'debit', 'credit']
+    vl_display_cols = [c for c in vl_display_cols if c in vl_ann.columns]
+    vl_display_cols += ['_remark', '_match_ref']
+
+    vl_headers = {
+        'doc_date': 'Doc Date', 'doc_no': 'Doc No', 'doc_type': 'Doc Type',
+        'particulars': 'Particulars', 'debit': 'Debit', 'credit': 'Credit',
+        '_remark': 'Remark', '_match_ref': 'Matched With'
+    }
+    headers = [vl_headers.get(c, c) for c in vl_display_cols]
+    style_header(ws_vl, headers, row=1, color='1C2130')
+
+    for r_idx, (_, row) in enumerate(vl_ann[vl_display_cols].iterrows(), 2):
+        remark = str(row.get('_remark', ''))
+        if 'Unmatched' in remark:
+            fill = COLORS['unmatched_fill']
+        elif 'Reversal' in remark or 'Reversed' in remark:
+            fill = COLORS['reversal_fill']
+        else:
+            fill = COLORS['matched_fill']
+
+        for c_idx, col in enumerate(vl_display_cols, 1):
+            val = row[col]
+            cell = write_cell(ws_vl, r_idx, c_idx, val)
+            cell.fill = PatternFill(fill_type='solid', fgColor=fill)
+            cell.border = border
+            cell.alignment = Alignment(vertical='center')
+            cell.font = Font(name='Calibri', size=9)
+        ws_vl.row_dimensions[r_idx].height = 18
+
+    auto_width(ws_vl)
+
+    # ══════════════════════════════════════════
+    # SHEET 3: CUSTOMER LEDGER WITH REMARKS
+    # ══════════════════════════════════════════
+    cl_ann = results['cl_annotated']
+    ws_cl = wb.create_sheet('Customer Ledger')
+    ws_cl.sheet_view.showGridLines = False
+    ws_cl.freeze_panes = 'A2'
+
+    cl_display_cols = ['doc_date', 'doc_no', 'doc_type', 'debit', 'credit']
+    cl_display_cols = [c for c in cl_display_cols if c in cl_ann.columns]
+    cl_display_cols += ['_remark', '_match_ref']
+
+    cl_headers = {
+        'doc_date': 'Doc Date', 'doc_no': 'Doc No', 'doc_type': 'Doc Type',
+        'debit': 'Debit (LC)', 'credit': 'Credit (LC)',
+        '_remark': 'Remark', '_match_ref': 'Matched With'
+    }
+    headers = [cl_headers.get(c, c) for c in cl_display_cols]
+    style_header(ws_cl, headers, row=1, color='1C2130')
+
+    for r_idx, (_, row) in enumerate(cl_ann[cl_display_cols].iterrows(), 2):
+        remark = str(row.get('_remark', ''))
+        fill = COLORS['unmatched_fill'] if 'Unmatched' in remark else COLORS['matched_fill']
+
+        for c_idx, col in enumerate(cl_display_cols, 1):
+            val = row[col]
+            cell = write_cell(ws_cl, r_idx, c_idx, val)
+            cell.fill = PatternFill(fill_type='solid', fgColor=fill)
+            cell.border = border
+            cell.alignment = Alignment(vertical='center')
+            cell.font = Font(name='Calibri', size=9)
+        ws_cl.row_dimensions[r_idx].height = 18
+
+    auto_width(ws_cl)
+
+    # ══════════════════════════════════════════
+    # REMAINING DETAIL SHEETS
+    # ══════════════════════════════════════════
     def write_sheet(title, data, color):
         if not data:
             return
@@ -686,16 +941,12 @@ def build_excel(results):
         style_header(ws, headers, row=1, color=color)
         for r, (_, row) in enumerate(df.iterrows(), 2):
             for c, val in enumerate(row.values, 1):
-                cell = ws.cell(row=r, column=c)
-                if isinstance(val, (pd.Timestamp, datetime)):
-                    cell.value = val.strftime('%d-%b-%Y') if not pd.isna(val) else ''
-                elif isinstance(val, float):
-                    cell.value = round(val, 2)
-                    cell.number_format = '#,##0.00'
-                else:
-                    cell.value = val
-        style_data(ws, 2, len(data) + 1, len(headers),
-                   row_color=None)
+                cell = write_cell(ws, r, c, val)
+                fill = 'F8F9FB' if r % 2 == 0 else 'FFFFFF'
+                cell.fill = PatternFill(fill_type='solid', fgColor=fill)
+                cell.border = border
+                cell.alignment = Alignment(vertical='center')
+                cell.font = Font(name='Calibri', size=9)
         auto_width(ws)
 
     write_sheet('Inv - Matched', results['invoice_matched'], '1A6B45')
@@ -707,7 +958,8 @@ def build_excel(results):
     write_sheet('Collections - Matched', results['collection_matched'], '1A6B45')
     write_sheet('Collections - Unmatch VL', results['collection_unmatched_vl'], 'A32035')
     write_sheet('Collections - Unmatch CL', results['collection_unmatched_cl'], 'A32035')
-    write_sheet('Reversed Excluded', results['reversed_excluded'], '555555')
+    write_sheet('Reversals - Matched', results['reversal_matched'], 'B85C00')
+    write_sheet('Reversals - Unmatched', results['reversal_unmatched'], 'A32035')
 
     wb.save(output)
     return output.getvalue()
@@ -716,17 +968,13 @@ def build_excel(results):
 # UI HELPERS
 # ─────────────────────────────────────────────
 
-def fmt_inr(val):
-    try:
-        return f"₹{val:,.2f}"
-    except:
-        return str(val)
-
-def display_df(df, color='default'):
-    if df.empty:
+def display_df(df):
+    if df is None or (isinstance(df, pd.DataFrame) and df.empty) or (isinstance(df, list) and len(df) == 0):
         st.info("No records in this category.")
         return
-    # Format date columns
+    if isinstance(df, list):
+        df = pd.DataFrame(df)
+    df = df.copy()
     for col in df.columns:
         if 'date' in col.lower() or 'Date' in col:
             df[col] = pd.to_datetime(df[col], errors='coerce').dt.strftime('%d-%b-%Y').fillna('')
@@ -737,44 +985,42 @@ def display_df(df, color='default'):
 # ─────────────────────────────────────────────
 
 def main():
-    # Header
     st.markdown("""
     <div class="recon-header">
         <div>
             <div class="recon-logo">⚖️ VendorSync</div>
-            <div class="recon-subtitle">Vendor · Customer Ledger Reconciliation · For Indian CAs & CFOs</div>
+            <div class="recon-subtitle">Vendor · Customer Ledger Reconciliation · For Indian CAs &amp; CFOs</div>
         </div>
     </div>
     """, unsafe_allow_html=True)
 
-    # Sidebar
     with st.sidebar:
         st.markdown("### ⚙️ Configuration")
         st.markdown("---")
-
         tolerance = st.number_input(
             "Amount Tolerance (₹)",
             min_value=0.0, max_value=100.0, value=1.0, step=0.5,
-            help="Max difference allowed when matching by amount (e.g. rounding differences)"
+            help="Max difference allowed when matching by amount"
         )
-
         st.markdown("---")
         st.markdown("### 📋 Matching Rules")
         st.markdown("""
         <div class="info-box">
         1. Invoices → Doc Number<br>
-        2. Reversed invoices → Excluded<br>
+        2. Reversals → Complete Reversal / Saleable Return (via Particulars)<br>
         3. Debit Notes → Doc No → Period+Amount<br>
         4. Collections → UTR → Period+Amount<br>
-        5. Remaining → Unmatched report
+        5. All items get ✅ Matched / ❌ Unmatched remark
         </div>
         """, unsafe_allow_html=True)
-
         st.markdown("---")
-        st.markdown("### 🔍 Column Detection")
         st.markdown("""
         <div class="info-box" style="font-size:0.72rem;">
-        Ledger columns are auto-detected. Ensure your Excel has standard column headers as per the format.
+        <b>Excel Output includes:</b><br>
+        • Summary sheet with match rates<br>
+        • Vendor Ledger tab with remarks<br>
+        • Customer Ledger tab with remarks<br>
+        • Detail sheets per category
         </div>
         """, unsafe_allow_html=True)
 
@@ -783,7 +1029,6 @@ def main():
     with col1:
         st.markdown('<span class="section-tag tag-blue">VENDOR LEDGER</span>', unsafe_allow_html=True)
         vl_file = st.file_uploader("Upload Vendor Ledger (.xlsx / .xls)", type=['xlsx', 'xls'], key='vl')
-
     with col2:
         st.markdown('<span class="section-tag tag-blue">CUSTOMER LEDGER</span>', unsafe_allow_html=True)
         cl_file = st.file_uploader("Upload Customer Ledger (.xlsx / .xls)", type=['xlsx', 'xls'], key='cl')
@@ -792,12 +1037,12 @@ def main():
         st.markdown("""
         <div class="info-box" style="margin-top:2rem; border-left-color: #4f8eff;">
         📂 Upload both ledger files above to begin reconciliation. The engine will automatically detect columns,
-        exclude reversed entries, and match invoices, debit notes, and collections using the configured rules.
+        handle reversals (Complete Reversal / Saleable Return), match invoices, debit notes, and collections,
+        and add Matched/Unmatched remarks to each row in the output Excel.
         </div>
         """, unsafe_allow_html=True)
         return
 
-    # Parse files
     with st.spinner("Parsing ledgers..."):
         try:
             vl = load_vendor_ledger(vl_file)
@@ -808,7 +1053,6 @@ def main():
 
     st.success(f"✅ Vendor Ledger: **{len(vl)}** rows  ·  Customer Ledger: **{len(cl)}** rows")
 
-    # Preview toggle
     with st.expander("👁 Preview Parsed Data"):
         pc1, pc2 = st.columns(2)
         with pc1:
@@ -820,39 +1064,42 @@ def main():
             display_cols = [c for c in ['doc_date', 'doc_no', 'doc_type', 'debit', 'credit'] if c in cl.columns]
             st.dataframe(cl[display_cols].head(10), use_container_width=True, hide_index=True)
 
-    # Run reconciliation
     if st.button("▶ Run Reconciliation", use_container_width=False):
         with st.spinner("Running reconciliation engine..."):
             results = run_reconciliation(vl, cl, tolerance=tolerance)
         st.session_state['results'] = results
+        st.session_state['vl'] = vl
+        st.session_state['cl'] = cl
 
     if 'results' not in st.session_state:
         return
 
     results = st.session_state['results']
+    vl = st.session_state['vl']
+    cl = st.session_state['cl']
 
-    # Stats
+    # ── SUMMARY STATS ──
     total_matched = len(results['invoice_matched']) + len(results['dn_matched']) + len(results['collection_matched'])
-    total_unmatched = (len(results['invoice_unmatched_vl']) + len(results['invoice_unmatched_cl']) +
-                       len(results['dn_unmatched_vl']) + len(results['dn_unmatched_cl']) +
-                       len(results['collection_unmatched_vl']) + len(results['collection_unmatched_cl']))
+    total_unmatched_vl = len(results['invoice_unmatched_vl']) + len(results['dn_unmatched_vl']) + len(results['collection_unmatched_vl'])
+    total_unmatched_cl = len(results['invoice_unmatched_cl']) + len(results['dn_unmatched_cl']) + len(results['collection_unmatched_cl'])
+    total_reversals = len(results['reversal_matched'])
 
     st.markdown(f"""
     <div class="stat-grid">
         <div class="stat-card matched">
             <div class="stat-label">Total Matched</div>
             <div class="stat-value">{total_matched}</div>
-            <div class="stat-sub">Across all categories</div>
+            <div class="stat-sub">Invoices + DN + Collections</div>
         </div>
         <div class="stat-card unmatched">
-            <div class="stat-label">Unmatched Items</div>
-            <div class="stat-value">{total_unmatched}</div>
-            <div class="stat-sub">Needs review</div>
+            <div class="stat-label">Unmatched (VL)</div>
+            <div class="stat-value">{total_unmatched_vl}</div>
+            <div class="stat-sub">CL Unmatched: {total_unmatched_cl}</div>
         </div>
         <div class="stat-card partial">
-            <div class="stat-label">Reversed & Excluded</div>
-            <div class="stat-value">{len(results['reversed_excluded'])}</div>
-            <div class="stat-sub">Fully reversed invoices</div>
+            <div class="stat-label">Reversals Reconciled</div>
+            <div class="stat-value">{total_reversals}</div>
+            <div class="stat-sub">Complete Reversal / Saleable Return</div>
         </div>
         <div class="stat-card total">
             <div class="stat-label">Invoice Matches</div>
@@ -862,73 +1109,152 @@ def main():
     </div>
     """, unsafe_allow_html=True)
 
-    # Download button
-    excel_data = build_excel(results)
+    # ── DETAILED SUMMARY TABLE ──
+    st.markdown("### 📊 Reconciliation Summary")
+
+    inv_vl = len(results['invoice_matched']) + len(results['invoice_unmatched_vl'])
+    inv_cl = len(results['invoice_matched']) + len(results['invoice_unmatched_cl'])
+    dn_vl = len(results['dn_matched']) + len(results['dn_unmatched_vl'])
+    dn_cl = len(results['dn_matched']) + len(results['dn_unmatched_cl'])
+    col_vl = len(results['collection_matched']) + len(results['collection_unmatched_vl'])
+    col_cl = len(results['collection_matched']) + len(results['collection_unmatched_cl'])
+
+    inv_pct = round(len(results['invoice_matched']) / inv_vl * 100, 1) if inv_vl else 0
+    dn_pct = round(len(results['dn_matched']) / dn_vl * 100, 1) if dn_vl else 0
+    col_pct = round(len(results['collection_matched']) / col_vl * 100, 1) if col_vl else 0
+
+    st.markdown(f"""
+    <table class="summary-table">
+        <thead>
+            <tr>
+                <th>Category</th>
+                <th class="num">VL Total</th>
+                <th class="num">Matched</th>
+                <th class="num">VL Unmatched</th>
+                <th class="num">CL Total</th>
+                <th class="num">CL Unmatched</th>
+                <th class="num">Match %</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td>🧾 Invoices</td>
+                <td class="num">{inv_vl}</td>
+                <td class="num matched-val">{len(results['invoice_matched'])}</td>
+                <td class="num unmatched-val">{len(results['invoice_unmatched_vl'])}</td>
+                <td class="num">{inv_cl}</td>
+                <td class="num unmatched-val">{len(results['invoice_unmatched_cl'])}</td>
+                <td class="num matched-val">{inv_pct}%</td>
+            </tr>
+            <tr>
+                <td>📝 Debit Notes</td>
+                <td class="num">{dn_vl}</td>
+                <td class="num matched-val">{len(results['dn_matched'])}</td>
+                <td class="num unmatched-val">{len(results['dn_unmatched_vl'])}</td>
+                <td class="num">{dn_cl}</td>
+                <td class="num unmatched-val">{len(results['dn_unmatched_cl'])}</td>
+                <td class="num matched-val">{dn_pct}%</td>
+            </tr>
+            <tr>
+                <td>💰 Collections</td>
+                <td class="num">{col_vl}</td>
+                <td class="num matched-val">{len(results['collection_matched'])}</td>
+                <td class="num unmatched-val">{len(results['collection_unmatched_vl'])}</td>
+                <td class="num">{col_cl}</td>
+                <td class="num unmatched-val">{len(results['collection_unmatched_cl'])}</td>
+                <td class="num matched-val">{col_pct}%</td>
+            </tr>
+            <tr>
+                <td>🔁 Reversals</td>
+                <td class="num">{len(results['reversal_matched']) * 2 + len(results['reversal_unmatched'])}</td>
+                <td class="num matched-val">{len(results['reversal_matched'])}</td>
+                <td class="num unmatched-val">{len(results['reversal_unmatched'])}</td>
+                <td class="num">—</td>
+                <td class="num">—</td>
+                <td class="num">—</td>
+            </tr>
+            <tr class="total-row">
+                <td><b>TOTAL</b></td>
+                <td class="num"><b>{inv_vl + dn_vl + col_vl}</b></td>
+                <td class="num matched-val"><b>{total_matched}</b></td>
+                <td class="num unmatched-val"><b>{total_unmatched_vl}</b></td>
+                <td class="num"><b>{inv_cl + dn_cl + col_cl}</b></td>
+                <td class="num unmatched-val"><b>{total_unmatched_cl}</b></td>
+                <td class="num matched-val"><b>—</b></td>
+            </tr>
+        </tbody>
+    </table>
+    """, unsafe_allow_html=True)
+
+    # ── DOWNLOAD ──
+    excel_data = build_excel(results, vl, cl)
     st.download_button(
         label="⬇ Download Full Reconciliation Report (.xlsx)",
         data=excel_data,
-        file_name=f"reconciliation_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+        file_name=f"VendorSync_Reconciliation_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=False,
     )
 
     st.markdown("---")
 
-    # Detailed tabs
+    # ── DETAIL TABS ──
     tabs = st.tabs([
         "🧾 Invoices",
         "📝 Debit Notes",
         "💰 Collections",
-        "🔁 Reversed",
+        "🔁 Reversals",
         "⚠️ All Unmatched",
     ])
 
     with tabs[0]:
         st.markdown('<span class="section-tag tag-matched">MATCHED INVOICES</span>', unsafe_allow_html=True)
-        display_df(pd.DataFrame(results['invoice_matched']))
+        display_df(results['invoice_matched'])
         c1, c2 = st.columns(2)
         with c1:
             st.markdown('<span class="section-tag tag-unmatched">UNMATCHED — VENDOR LEDGER</span>', unsafe_allow_html=True)
-            display_df(pd.DataFrame(results['invoice_unmatched_vl']))
+            display_df(results['invoice_unmatched_vl'])
         with c2:
             st.markdown('<span class="section-tag tag-unmatched">UNMATCHED — CUSTOMER LEDGER</span>', unsafe_allow_html=True)
-            display_df(pd.DataFrame(results['invoice_unmatched_cl']))
+            display_df(results['invoice_unmatched_cl'])
 
     with tabs[1]:
         st.markdown('<span class="section-tag tag-matched">MATCHED DEBIT NOTES</span>', unsafe_allow_html=True)
-        display_df(pd.DataFrame(results['dn_matched']))
+        display_df(results['dn_matched'])
         c1, c2 = st.columns(2)
         with c1:
             st.markdown('<span class="section-tag tag-unmatched">UNMATCHED — VENDOR LEDGER</span>', unsafe_allow_html=True)
-            display_df(pd.DataFrame(results['dn_unmatched_vl']))
+            display_df(results['dn_unmatched_vl'])
         with c2:
             st.markdown('<span class="section-tag tag-unmatched">UNMATCHED — CUSTOMER LEDGER</span>', unsafe_allow_html=True)
-            display_df(pd.DataFrame(results['dn_unmatched_cl']))
+            display_df(results['dn_unmatched_cl'])
 
     with tabs[2]:
         st.markdown('<span class="section-tag tag-matched">MATCHED COLLECTIONS</span>', unsafe_allow_html=True)
-        display_df(pd.DataFrame(results['collection_matched']))
+        display_df(results['collection_matched'])
         c1, c2 = st.columns(2)
         with c1:
             st.markdown('<span class="section-tag tag-unmatched">UNMATCHED — VENDOR LEDGER</span>', unsafe_allow_html=True)
-            display_df(pd.DataFrame(results['collection_unmatched_vl']))
+            display_df(results['collection_unmatched_vl'])
         with c2:
             st.markdown('<span class="section-tag tag-unmatched">UNMATCHED — CUSTOMER LEDGER</span>', unsafe_allow_html=True)
-            display_df(pd.DataFrame(results['collection_unmatched_cl']))
+            display_df(results['collection_unmatched_cl'])
 
     with tabs[3]:
-        st.markdown('<span class="section-tag tag-partial">REVERSED & EXCLUDED INVOICES</span>', unsafe_allow_html=True)
-        st.caption("These invoices were fully reversed in the Vendor Ledger (Debit = Credit) and excluded from matching.")
-        display_df(pd.DataFrame(results['reversed_excluded']))
+        st.markdown('<span class="section-tag tag-partial">REVERSALS RECONCILED (Complete Reversal / Saleable Return)</span>', unsafe_allow_html=True)
+        st.caption("Reversal invoices matched to their original invoice via the Particulars column.")
+        display_df(results['reversal_matched'])
+        if results['reversal_unmatched']:
+            st.markdown('<span class="section-tag tag-unmatched">REVERSALS — ORIGINAL NOT FOUND</span>', unsafe_allow_html=True)
+            display_df(results['reversal_unmatched'])
 
     with tabs[4]:
         all_unmatched = []
         for item in results['invoice_unmatched_vl'] + results['dn_unmatched_vl'] + results['collection_unmatched_vl']:
-            item['Ledger'] = 'Vendor'; all_unmatched.append(item)
+            item = dict(item); item['Ledger'] = 'Vendor'; all_unmatched.append(item)
         for item in results['invoice_unmatched_cl'] + results['dn_unmatched_cl'] + results['collection_unmatched_cl']:
-            item['Ledger'] = 'Customer'; all_unmatched.append(item)
+            item = dict(item); item['Ledger'] = 'Customer'; all_unmatched.append(item)
         st.markdown('<span class="section-tag tag-unmatched">ALL UNMATCHED ITEMS</span>', unsafe_allow_html=True)
-        display_df(pd.DataFrame(all_unmatched))
+        display_df(all_unmatched)
 
 
 if __name__ == "__main__":
