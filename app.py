@@ -854,7 +854,7 @@ def build_excel(results, vl_orig, cl_orig):
     # ══════════════════════════════════════════
     # SHEET 2: VENDOR LEDGER WITH REMARKS
     # ══════════════════════════════════════════
-    vl_ann = results['vl_annotated']
+    vl_ann = vl_orig  # passed in as argument
     ws_vl = wb.create_sheet('Vendor Ledger')
     ws_vl.sheet_view.showGridLines = False
     ws_vl.freeze_panes = 'A2'
@@ -895,7 +895,7 @@ def build_excel(results, vl_orig, cl_orig):
     # ══════════════════════════════════════════
     # SHEET 3: CUSTOMER LEDGER WITH REMARKS
     # ══════════════════════════════════════════
-    cl_ann = results['cl_annotated']
+    cl_ann = cl_orig  # passed in as argument
     ws_cl = wb.create_sheet('Customer Ledger')
     ws_cl.sheet_view.showGridLines = False
     ws_cl.freeze_panes = 'A2'
@@ -1067,16 +1067,18 @@ def main():
     if st.button("▶ Run Reconciliation", use_container_width=False):
         with st.spinner("Running reconciliation engine..."):
             results = run_reconciliation(vl, cl, tolerance=tolerance)
+        # Store only serializable data — annotated ledgers stored as JSON-safe dicts
+        results['vl_annotated'] = results['vl_annotated'].astype(str).to_dict('records')
+        results['cl_annotated'] = results['cl_annotated'].astype(str).to_dict('records')
         st.session_state['results'] = results
-        st.session_state['vl'] = vl
-        st.session_state['cl'] = cl
 
     if 'results' not in st.session_state:
         return
 
     results = st.session_state['results']
-    vl = st.session_state['vl']
-    cl = st.session_state['cl']
+    # Restore annotated ledgers as DataFrames
+    vl_ann_df = pd.DataFrame(results['vl_annotated'])
+    cl_ann_df = pd.DataFrame(results['cl_annotated'])
 
     # ── SUMMARY STATS ──
     total_matched = len(results['invoice_matched']) + len(results['dn_matched']) + len(results['collection_matched'])
@@ -1187,7 +1189,7 @@ def main():
     """, unsafe_allow_html=True)
 
     # ── DOWNLOAD ──
-    excel_data = build_excel(results, vl, cl)
+    excel_data = build_excel(results, vl_ann_df, cl_ann_df)
     st.download_button(
         label="⬇ Download Full Reconciliation Report (.xlsx)",
         data=excel_data,
