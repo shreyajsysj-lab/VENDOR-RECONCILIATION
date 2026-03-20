@@ -913,9 +913,9 @@ def build_excel(results, vl_orig, cl_orig):
          '-', '-', '-', 'Reversal entry without matching original'],
     ]
 
-    row_colors = ['FFFFFF', 'F8F9FB', 'FFFFFF', 'FFF9E6']
+    row_colors = ['FFFFFF', 'F8F9FB', 'FFFFFF', 'FFF9E6', 'F0F4FF', 'FFF0F0']
     for r_idx, row_data in enumerate(summary_rows, 5):
-        fill = row_colors[r_idx - 5]
+        fill = row_colors[(r_idx - 5) % len(row_colors)]
         for c_idx, val in enumerate(row_data, 1):
             cell = ws_sum.cell(row=r_idx, column=c_idx, value=val)
             cell.fill = PatternFill(fill_type='solid', fgColor=fill)
