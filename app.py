@@ -1439,7 +1439,11 @@ def build_excel(results, vl_orig, cl_orig, VL='Vendor', CL='Customer'):
     cn_v         = ssum([r for r in results['dn_matched'] if 'Credit Note' in str(r.get('Match Type',''))], 'VL Debit') +                    ssum([r for r in results['dn_matched'] if 'Credit Note' in str(r.get('Match Type',''))], 'VL Credit')
     rev_cross_v  = ssum(results['reversal_cross_ledger'], 'VL Original Debit') + ssum(results['reversal_cross_ledger'], 'VL Original Credit')
     vl_close  = results.get('vl_closing') or 0.0
-    cl_close  = results.get('cl_closing') or (inv_un_cl_v - inv_un_vl_v)
+    # CL closing = Credit (Cr) - Debit (Dr)
+    cl_close  = results.get('cl_closing') or (
+        ssum(results['invoice_unmatched_cl'] + results['dn_unmatched_cl'] + results['collection_unmatched_cl'], 'Credit') -
+        ssum(results['invoice_unmatched_cl'] + results['dn_unmatched_cl'] + results['collection_unmatched_cl'], 'Debit')
+    )
 
     rs_rows = [
         ('Particular', 'Amount (₹)', 'H'),
@@ -1614,12 +1618,16 @@ def main():
             st.error(f"Error reading files: {e}")
             return
 
-    # Closing balances — VL from closing column, CL from closing column or debit-credit sum
+    # Closing balances
+    # VL: from closing balance column in the file
     vl_closing = vl['closing'].dropna().iloc[-1] if 'closing' in vl.columns and not vl['closing'].dropna().empty else None
-    if 'closing' in cl.columns and not cl['closing'].dropna().empty:
-        cl_closing = cl['closing'].dropna().iloc[-1]
+
+    # CL: always use formula Credit (Cr) - Debit (Dr) as instructed
+    # This gives the correct payable/receivable balance from customer's perspective
+    if 'credit' in cl.columns and 'debit' in cl.columns:
+        cl_closing = cl['credit'].sum() - cl['debit'].sum()
     else:
-        cl_closing = cl['debit'].sum() - cl['credit'].sum() if 'debit' in cl.columns else None
+        cl_closing = None
 
     st.success(f"✅ {VL}: **{len(vl)}** rows  ·  {CL}: **{len(cl)}** rows")
 
@@ -1849,7 +1857,7 @@ def main():
     st.markdown("---")
     st.markdown("### 📋 Ledger Reconciliation Statement")
     vl_bal     = float(vl_closing_val) if vl_closing_val else 0.0
-    cl_bal_act = float(cl_closing_val) if cl_closing_val else 0.0
+    cl_bal_act = float(cl_closing_val) if cl_closing_val is not None else 0.0
     adj_inv_vl = inv_un_vl_val
     adj_cn_vl  = cn_matched_val
     adj_dn_cl  = dn_un_cl_val
@@ -1858,7 +1866,7 @@ def main():
     adj_pay_cl = col_un_cl_val
     net_bal_b  = vl_bal - adj_inv_vl + adj_cn_vl - adj_dn_cl + adj_inv_cl + adj_pay_vl - adj_pay_cl
     # Use actual CL closing if available, else approximate
-    cl_balance = cl_bal_act if cl_bal_act != 0.0 else (total_un_cl_val - total_un_vl_val)
+    cl_balance = cl_bal_act  # Credit (Cr) - Debit (Dr) from customer ledger
     diff_bc    = net_bal_b - cl_balance
 
     recon_rows = [
