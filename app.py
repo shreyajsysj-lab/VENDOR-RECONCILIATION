@@ -638,24 +638,33 @@ def run_reconciliation(vl_orig, cl_orig, tolerance=1.0):
                 })
         else:
             # ── CASE C: No original found OR amount mismatch ──
-            # DO NOT mark as _matched — let these flow into normal invoice/credit note matching below
-            reason = 'Original Invoice Not Found in VL'
-            if orig_match is not None and not amount_valid:
-                orig_amt_disp = round_amount(orig_match.get('debit', 0) + orig_match.get('credit', 0))
-                reason = f'Amount Mismatch (Reversal ₹{rev_amount:,.2f} vs Original ₹{orig_amt_disp:,.2f})'
-            # Mark as matched=True only to prevent double-processing in reversal loop
-            # but add to reversal_unmatched for reporting; will be re-attempted in Step 2/2B
+            is_amount_mismatch = (orig_match is not None and not amount_valid)
+
+            # Remark in VL ledger — clean, no amounts embedded
+            if is_amount_mismatch:
+                vl_remark = 'Unmatched — Amount Mismatch'
+            else:
+                vl_remark = 'Unmatched — Original Invoice Not Found in VL'
+
+            # Separate amount columns for the annexure report
+            rev_amt_col  = rev_amount
+            orig_amt_col = round_amount(orig_match.get('debit', 0) + orig_match.get('credit', 0)) if orig_match is not None else 0
+            reason_col   = 'Amount Mismatch' if is_amount_mismatch else 'Original Invoice Not Found in VL'
+
             vl.at[idx, '_matched'] = True
-            vl.at[idx, '_remark'] = f'Unmatched — {reason}'
+            vl.at[idx, '_remark']  = vl_remark
+
             results['reversal_unmatched'].append({
-                'VL Doc No': str(rev_row.get('doc_no', '')),
-                'VL Date': rev_row.get('doc_date', ''),
-                'VL Type': rev_row.get('doc_type', ''),
-                'Particulars': raw_particulars,
-                'Debit': rev_row.get('debit', 0),
-                'Credit': rev_row.get('credit', 0),
-                'Reason': reason,
-                'Remark': f'Unmatched — {reason}',
+                'VL Doc No':          str(rev_row.get('doc_no', '')),
+                'VL Date':            rev_row.get('doc_date', ''),
+                'VL Type':            rev_row.get('doc_type', ''),
+                'Particulars':        raw_particulars,
+                'VL Reversal Amount': rev_amt_col,
+                'Original Amount':    orig_amt_col,
+                'VL Debit':           rev_row.get('debit', 0),
+                'VL Credit':          rev_row.get('credit', 0),
+                'Reason':             reason_col,
+                'Remark':             vl_remark,
             })
 
     # ════════════════════════════════════════════════════
