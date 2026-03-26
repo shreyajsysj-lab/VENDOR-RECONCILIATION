@@ -363,25 +363,59 @@ def extract_ref_from_particulars(particulars):
 # LOAD & PARSE
 # ─────────────────────────────────────────────
 
-def load_vendor_ledger(file):
-    df = pd.read_excel(file, header=None)
-    header_row = None
-    for i, row in df.iterrows():
-        vals = [str(v).lower() for v in row if not pd.isna(v)]
-        if any('doc' in v and 'date' in v for v in vals) or any('doc. date' in v for v in vals):
-            header_row = i
-            break
-    if header_row is None:
-        for i, row in df.iterrows():
-            vals = [str(v).lower() for v in row if not pd.isna(v)]
-            if any('debit' in v for v in vals) and any('credit' in v for v in vals):
-                header_row = i
-                break
-    if header_row is None:
-        header_row = 0
+def _get_closing_from_raw(df_raw):
+    """
+    Extract closing balance from the raw (unfiltered) DataFrame.
+    Looks for a column whose name contains 'closing' or 'balance',
+    returns the last non-null numeric value from that column.
+    Works for ANY ledger format — not vendor/customer specific.
+    """
+    for c in df_raw.columns:
+        cl = str(c).lower()
+        if 'closing' in cl or ('balance' in cl and 'opening' not in cl):
+            series = pd.to_numeric(df_raw[c], errors='coerce').dropna()
+            if not series.empty:
+                return float(series.iloc[-1])
+    return None
 
-    df.columns = df.iloc[header_row]
-    df = df.iloc[header_row + 1:].reset_index(drop=True)
+
+def _detect_header_row(df, keywords_any=None, keywords_all=None):
+    """
+    Generic header row detector — scans rows for keyword patterns.
+    keywords_any: list of strings — row qualifies if ANY found
+    keywords_all: list of lists — row qualifies if ALL items in any sublist found
+    Returns row index or 0 as fallback.
+    """
+    for i, row in df.iterrows():
+        vals = [str(v).lower().strip() for v in row if not pd.isna(v)]
+        combined = ' '.join(vals)
+        if keywords_any and any(k in combined for k in keywords_any):
+            return i
+        if keywords_all:
+            for group in keywords_all:
+                if all(any(k in v for v in vals) for k in group):
+                    return i
+    return 0
+
+
+def load_vendor_ledger(file):
+    raw = pd.read_excel(file, header=None)
+
+    # Generic header detection — any row with date+doc keywords OR debit+credit
+    header_row = _detect_header_row(raw,
+        keywords_all=[
+            ['doc', 'date'],
+            ['debit', 'credit'],
+        ]
+    )
+
+    # Capture closing balance from raw BEFORE any row filtering
+    raw_with_headers = raw.iloc[header_row:].copy()
+    raw_with_headers.columns = [str(c).strip() for c in raw.iloc[header_row]]
+    raw_data_only = raw_with_headers.iloc[1:].reset_index(drop=True)
+    vl_closing = _get_closing_from_raw(raw_data_only)
+
+    df = raw_data_only.copy()
     df.columns = [str(c).strip() for c in df.columns]
 
     col_map = {}
@@ -389,19 +423,19 @@ def load_vendor_ledger(file):
         cl = c.lower()
         if 'doc' in cl and 'date' in cl:
             col_map[c] = 'doc_date'
-        elif 'doc' in cl and ('no' in cl or 'num' in cl or 'type' not in cl) and 'date' not in cl and 'type' not in cl:
+        elif ('doc' in cl or 'voucher' in cl or 'vch' in cl) and ('no' in cl or 'num' in cl or 'ref' in cl) and 'date' not in cl and 'type' not in cl:
             col_map[c] = 'doc_no'
-        elif 'doc' in cl and 'type' in cl:
+        elif ('doc' in cl or 'voucher' in cl or 'vch' in cl) and 'type' in cl:
             col_map[c] = 'doc_type'
-        elif 'particular' in cl:
+        elif 'particular' in cl or 'narration' in cl or 'description' in cl:
             col_map[c] = 'particulars'
         elif 'opening' in cl:
             col_map[c] = 'opening'
-        elif 'debit' in cl:
+        elif 'debit' in cl and 'credit' not in cl:
             col_map[c] = 'debit'
-        elif 'credit' in cl:
+        elif 'credit' in cl and 'debit' not in cl:
             col_map[c] = 'credit'
-        elif 'closing' in cl or 'balance' in cl:
+        elif 'closing' in cl or ('balance' in cl and 'opening' not in cl):
             col_map[c] = 'closing'
     df = df.rename(columns=col_map)
 
@@ -411,32 +445,42 @@ def load_vendor_ledger(file):
             df[col] = np.nan
 
     df['doc_date'] = pd.to_datetime(df['doc_date'], errors='coerce', dayfirst=True)
-    df['debit'] = pd.to_numeric(df['debit'], errors='coerce').fillna(0)
-    df['credit'] = pd.to_numeric(df['credit'], errors='coerce').fillna(0)
+    df['debit']   = pd.to_numeric(df['debit'],   errors='coerce').fillna(0)
+    df['credit']  = pd.to_numeric(df['credit'],  errors='coerce').fillna(0)
     df['closing'] = pd.to_numeric(df['closing'], errors='coerce')
-    df['doc_no_clean'] = df['doc_no'].apply(clean_doc_number)
-    df['period'] = df['doc_date'].apply(get_period)
+    df['doc_no_clean']    = df['doc_no'].apply(clean_doc_number)
+    df['period']          = df['doc_date'].apply(get_period)
     df['particulars_ref'] = df['particulars'].apply(extract_ref_from_particulars)
     df = df[df['doc_no_clean'] != ''].reset_index(drop=True)
-    df['_idx'] = df.index
-    df['_remark'] = ''
+    df['_idx']      = df.index
+    df['_remark']   = ''
     df['_match_ref'] = ''
+    # Store closing balance as attribute accessible after load
+    df._vl_closing  = vl_closing
     return df
 
 
 def load_customer_ledger(file):
-    df = pd.read_excel(file, header=None)
-    header_row = None
-    for i, row in df.iterrows():
-        vals = [str(v).lower() for v in row if not pd.isna(v)]
-        if any('document' in v for v in vals) and any('debit' in v or 'credit' in v for v in vals):
-            header_row = i
-            break
-    if header_row is None:
-        header_row = 0
+    raw = pd.read_excel(file, header=None)
 
-    df.columns = df.iloc[header_row]
-    df = df.iloc[header_row + 1:].reset_index(drop=True)
+    # Generic header detection — any format with date + debit/credit columns
+    header_row = _detect_header_row(raw,
+        keywords_all=[
+            ['date', 'debit'],
+            ['date', 'credit'],
+            ['document', 'debit'],
+            ['document', 'credit'],
+            ['debit', 'credit'],
+        ]
+    )
+
+    # Capture closing balance from raw BEFORE any row filtering
+    raw_with_headers = raw.iloc[header_row:].copy()
+    raw_with_headers.columns = [str(c).strip() for c in raw.iloc[header_row]]
+    raw_data_only = raw_with_headers.iloc[1:].reset_index(drop=True)
+    cl_closing = _get_closing_from_raw(raw_data_only)
+
+    df = raw_data_only.copy()
     df.columns = [str(c).strip() for c in df.columns]
 
     col_map = {}
@@ -446,13 +490,14 @@ def load_customer_ledger(file):
             col_map[c] = 'doc_date'
         elif 'type' in cl:
             col_map[c] = 'doc_type'
-        elif ('no' in cl or 'detail' in cl or 'num' in cl) and 'date' not in cl and 'type' not in cl:
+        elif ('no' in cl or 'detail' in cl or 'num' in cl or 'ref' in cl or 'voucher' in cl or 'vch' in cl) \
+                and 'date' not in cl and 'type' not in cl:
             col_map[c] = 'doc_no'
-        elif 'debit' in cl:
+        elif 'debit' in cl and 'credit' not in cl:
             col_map[c] = 'debit'
-        elif 'credit' in cl:
+        elif 'credit' in cl and 'debit' not in cl:
             col_map[c] = 'credit'
-        elif 'closing' in cl or 'balance' in cl:
+        elif 'closing' in cl or ('balance' in cl and 'opening' not in cl):
             col_map[c] = 'closing'
     df = df.rename(columns=col_map)
 
@@ -471,6 +516,8 @@ def load_customer_ledger(file):
     df['_idx']       = df.index
     df['_remark']    = ''
     df['_match_ref'] = ''
+    # Store closing balance
+    df._cl_closing   = cl_closing
     return df
 
 # ─────────────────────────────────────────────
@@ -1660,6 +1707,53 @@ def main():
         </div>
         """, unsafe_allow_html=True)
 
+    # ── Sample Format Download ──
+    with st.expander("📥 Download Sample Format (if unsure about column names)"):
+        st.caption("Your files can have any vendor/customer name. The app auto-detects columns. Download these samples to see the expected format.")
+        s1, s2 = st.columns(2)
+
+        # Generate minimal sample VL Excel
+        vl_sample_buf = BytesIO()
+        vl_sample_df = pd.DataFrame({
+            'Doc Date':       ['01-Apr-2025', '05-Apr-2025', '10-Apr-2025'],
+            'Doc No':         ['INV/001',     'INV/002',     'PAY/001'],
+            'Doc Type Name':  ['Tax Invoice', 'Tax Invoice', 'Payment'],
+            'Particulars':    ['Sale of goods', 'Sale of goods', 'NEFT payment'],
+            'Debit':          [10000,          15000,          0],
+            'Credit':         [0,              0,              8000],
+            'Closing Balance':[10000,          25000,          17000],
+        })
+        vl_sample_df.to_excel(vl_sample_buf, index=False)
+        s1.download_button(
+            '⬇️ Sample Vendor Ledger Format',
+            data=vl_sample_buf.getvalue(),
+            file_name='Sample_Vendor_Ledger.xlsx',
+            mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            use_container_width=True,
+            key='sample_vl',
+        )
+
+        # Generate minimal sample CL Excel
+        cl_sample_buf = BytesIO()
+        cl_sample_df = pd.DataFrame({
+            'Document Date':  ['01-Apr-2025', '05-Apr-2025', '10-Apr-2025'],
+            'Document Type':  ['Tax Invoice', 'Tax Invoice', 'Payment'],
+            'Document No':    ['INV/001',     'INV/002',     'PAY/001'],
+            'Debit (LC)':     [0,             0,             8000],
+            'Credit (LC)':    [10000,         15000,         0],
+            'Closing Balance':[-10000,        -25000,        -17000],
+        })
+        cl_sample_df.to_excel(cl_sample_buf, index=False)
+        s2.download_button(
+            '⬇️ Sample Customer Ledger Format',
+            data=cl_sample_buf.getvalue(),
+            file_name='Sample_Customer_Ledger.xlsx',
+            mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            use_container_width=True,
+            key='sample_cl',
+        )
+        st.info("ℹ️ Your actual files can have different column names — the app auto-detects common variations like 'Doc. Date', 'Voucher No', 'Narration', 'Debit', 'Credit (LC)', 'Balance', etc.")
+
     # File upload with vendor/customer color coding
     col1, col2 = st.columns(2)
     with col1:
@@ -1712,9 +1806,16 @@ def main():
     vl = st.session_state['vl_parsed']
     cl = st.session_state['cl_parsed']
 
-    # Closing balances — both read identically from the 'closing' column in the file
-    vl_closing = vl['closing'].dropna().iloc[-1] if 'closing' in vl.columns and not vl['closing'].dropna().empty else None
-    cl_closing = cl['closing'].dropna().iloc[-1] if 'closing' in cl.columns and not cl['closing'].dropna().empty else None
+    # Closing balances — read from raw file before row filtering (captured during load)
+    # Both use the same logic: last non-null value from closing/balance column
+    vl_closing = getattr(vl, '_vl_closing', None)
+    if vl_closing is None:
+        # Fallback: try from the filtered df closing column
+        vl_closing = vl['closing'].dropna().iloc[-1] if 'closing' in vl.columns and not vl['closing'].dropna().empty else None
+
+    cl_closing = getattr(cl, '_cl_closing', None)
+    if cl_closing is None:
+        cl_closing = cl['closing'].dropna().iloc[-1] if 'closing' in cl.columns and not cl['closing'].dropna().empty else None
 
     st.success(f"✅ {VL}: **{len(vl)}** rows  ·  {CL}: **{len(cl)}** rows")
 
@@ -1747,12 +1848,23 @@ def main():
             results = run_reconciliation(vl, cl, tolerance=tolerance)
 
         def safe_records(df):
+            """Convert DataFrame to list of dicts safely — handles any column types."""
+            if not isinstance(df, pd.DataFrame):
+                return df  # already a list or other type
             d = df.copy()
-            for col in d.columns:
-                if col.startswith('_'):
-                    d[col] = d[col].astype(str).replace('nan', '')
-                elif d[col].dtype == object:
-                    d[col] = d[col].fillna('').astype(str)
+            for col in list(d.columns):
+                try:
+                    if col.startswith('_'):
+                        d[col] = d[col].astype(str).replace('nan', '').replace('None', '')
+                    elif hasattr(d[col], 'dtype') and d[col].dtype == object:
+                        d[col] = d[col].fillna('').astype(str)
+                    elif hasattr(d[col], 'dtype') and str(d[col].dtype).startswith('datetime'):
+                        d[col] = d[col].astype(str)
+                except Exception:
+                    try:
+                        d[col] = d[col].fillna('').astype(str)
+                    except Exception:
+                        pass
             return d.to_dict('records')
 
         results['vl_annotated'] = safe_records(results['vl_annotated'])
