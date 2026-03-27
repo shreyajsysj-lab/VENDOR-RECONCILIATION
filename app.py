@@ -28,7 +28,7 @@ st.set_page_config(
 # ─────────────────────────────────────────────
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Mono:wght@300;400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Poppins:wght@600;700;800&display=swap');
 
 /* ── Hide Streamlit chrome ── */
 #MainMenu {visibility: hidden !important;}
@@ -40,33 +40,32 @@ header {visibility: hidden !important;}
 .stDeployButton {display: none !important;}
 
 :root {
-    --bg: #0d0f14;
-    --surface: #141720;
-    --surface2: #1c2130;
-    --border: #252c3d;
-    --accent: #4f8eff;
-    --accent2: #00d4aa;
-    --warn: #ff8c42;
-    --danger: #ff4d6d;
-    --text: #e8ecf4;
-    --muted: #7a8499;
-    --matched: #00d4aa22;
-    --matched-border: #00d4aa55;
-    --unmatched: #ff4d6d22;
-    --unmatched-border: #ff4d6d55;
-    --partial: #ff8c4222;
-    --partial-border: #ff8c4255;
-    /* Vendor = blue tone, Customer = teal tone */
-    --vl-color: #4f8eff;
-    --vl-bg: #4f8eff18;
-    --vl-border: #4f8eff44;
-    --cl-color: #00d4aa;
-    --cl-bg: #00d4aa18;
-    --cl-border: #00d4aa44;
+    --bg:           #F5F7FA;
+    --surface:      #FFFFFF;
+    --surface2:     #EFF2F7;
+    --border:       #D1D9E6;
+    --accent:       #1A3A6B;
+    --accent2:      #1A6B45;
+    --warn:         #B85C00;
+    --danger:       #A32035;
+    --text:         #1A202C;
+    --muted:        #5A6A85;
+    --matched:      #E8F5EE;
+    --matched-border:#A8D5BA;
+    --unmatched:    #FDE8EB;
+    --unmatched-border:#F5A8B4;
+    --partial:      #FFF3E0;
+    --partial-border:#FFB74D;
+    --vl-color:     #1A3A6B;
+    --vl-bg:        #EEF3FF;
+    --vl-border:    #A8BFEE;
+    --cl-color:     #1A6B45;
+    --cl-bg:        #EEF8F3;
+    --cl-border:    #A8D5BA;
 }
 
 html, body, [class*="css"] {
-    font-family: 'DM Mono', monospace;
+    font-family: 'Inter', sans-serif;
     background-color: var(--bg) !important;
     color: var(--text) !important;
 }
@@ -75,101 +74,74 @@ html, body, [class*="css"] {
 .block-container { padding: 1.5rem 2rem !important; max-width: 1400px; }
 
 [data-testid="stSidebar"] {
-    background: var(--surface) !important;
-    border-right: 1px solid var(--border);
+    background: #1A3A6B !important;
+    border-right: none;
 }
-[data-testid="stSidebar"] * { color: var(--text) !important; }
+[data-testid="stSidebar"] * { color: #FFFFFF !important; }
+[data-testid="stSidebar"] .stMarkdown p { color: #CBD5E0 !important; }
+[data-testid="stSidebar"] input { background: #2A4A8B !important; color: white !important; border-color: #4A6AAB !important; }
 
 .recon-header {
     display: flex;
     align-items: center;
     gap: 1rem;
-    margin-bottom: 2rem;
-    padding-bottom: 1.5rem;
-    border-bottom: 1px solid var(--border);
+    margin-bottom: 1.5rem;
+    padding: 1.25rem 1.5rem;
+    border-radius: 12px;
+    background: linear-gradient(135deg, #1A3A6B, #1A6B45);
 }
 .recon-logo {
-    font-family: 'Syne', sans-serif;
-    font-size: 2rem;
+    font-family: 'Poppins', sans-serif;
+    font-size: 1.8rem;
     font-weight: 800;
-    background: linear-gradient(135deg, var(--accent), var(--accent2));
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    letter-spacing: -0.03em;
+    color: #FFFFFF;
+    letter-spacing: -0.02em;
 }
 .recon-subtitle {
-    font-size: 0.75rem;
-    color: var(--muted);
+    font-size: 0.72rem;
+    color: #CBD5E0;
     text-transform: uppercase;
     letter-spacing: 0.12em;
+    margin-top: 2px;
 }
 
 .stat-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem; margin-bottom: 1.5rem; }
 .stat-card {
     background: var(--surface);
     border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 1rem 1.25rem;
+    border-radius: 12px;
+    padding: 1.1rem 1.25rem;
     position: relative;
     overflow: hidden;
+    box-shadow: 0 2px 8px rgba(26,58,107,0.07);
 }
 .stat-card::before {
     content: '';
     position: absolute;
     top: 0; left: 0; right: 0;
-    height: 2px;
+    height: 3px;
 }
-.stat-card.matched::before { background: var(--accent2); }
-.stat-card.unmatched::before { background: var(--danger); }
-.stat-card.partial::before { background: var(--warn); }
-.stat-card.total::before { background: var(--accent); }
-.stat-label { font-size: 0.7rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.1em; }
-.stat-value { font-family: 'Syne', sans-serif; font-size: 1.8rem; font-weight: 700; margin: 0.25rem 0; }
-.stat-card.matched .stat-value { color: var(--accent2); }
-.stat-card.unmatched .stat-value { color: var(--danger); }
-.stat-card.partial .stat-value { color: var(--warn); }
-.stat-card.total .stat-value { color: var(--accent); }
-.stat-sub { font-size: 0.7rem; color: var(--muted); }
-
-/* Summary table */
-.summary-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 0.82rem;
-    margin-bottom: 1.5rem;
-}
-.summary-table th {
-    background: var(--surface2);
-    color: var(--accent);
-    padding: 10px 14px;
-    text-align: left;
-    border-bottom: 2px solid var(--border);
-    font-family: 'Syne', sans-serif;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    font-size: 0.7rem;
-}
-.summary-table td {
-    padding: 9px 14px;
-    border-bottom: 1px solid var(--border);
-    color: var(--text);
-}
-.summary-table tr:hover td { background: var(--surface2); }
-.summary-table .num { text-align: right; font-weight: 600; }
-.summary-table .matched-val { color: var(--accent2); }
-.summary-table .unmatched-val { color: var(--danger); }
-.summary-table .total-row td { background: var(--surface2); font-weight: 700; border-top: 2px solid var(--border); }
+.stat-card.matched::before { background: #1A6B45; }
+.stat-card.unmatched::before { background: #A32035; }
+.stat-card.partial::before { background: #B85C00; }
+.stat-card.total::before { background: #1A3A6B; }
+.stat-label { font-size: 0.68rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.1em; font-weight: 600; }
+.stat-value { font-family: 'Poppins', sans-serif; font-size: 1.9rem; font-weight: 700; margin: 0.2rem 0; color: var(--text); }
+.stat-card.matched .stat-value  { color: #1A6B45; }
+.stat-card.unmatched .stat-value{ color: #A32035; }
+.stat-card.partial .stat-value  { color: #B85C00; }
+.stat-card.total .stat-value    { color: #1A3A6B; }
+.stat-sub { font-size: 0.68rem; color: var(--muted); }
 
 .stTabs [data-baseweb="tab-list"] {
-    background: var(--surface) !important;
+    background: var(--surface2) !important;
     border-radius: 8px;
     padding: 4px;
     gap: 2px;
     border: 1px solid var(--border);
 }
 .stTabs [data-baseweb="tab"] {
-    font-family: 'Syne', sans-serif !important;
+    font-family: 'Inter', sans-serif !important;
     font-size: 0.8rem !important;
     font-weight: 600 !important;
     color: var(--muted) !important;
@@ -178,75 +150,71 @@ html, body, [class*="css"] {
     padding: 6px 16px !important;
 }
 .stTabs [aria-selected="true"] {
-    background: var(--surface2) !important;
-    color: var(--text) !important;
+    background: #1A3A6B !important;
+    color: #FFFFFF !important;
 }
 
-[data-testid="stDataFrame"] { border-radius: 8px; overflow: hidden; }
+[data-testid="stDataFrame"] { border-radius: 8px; overflow: hidden; box-shadow: 0 1px 6px rgba(0,0,0,0.06); }
 
 .stButton > button {
-    font-family: 'Syne', sans-serif !important;
-    font-weight: 700 !important;
-    background: linear-gradient(135deg, var(--accent), #3d6fcc) !important;
+    font-family: 'Inter', sans-serif !important;
+    font-weight: 600 !important;
+    background: linear-gradient(135deg, #1A3A6B, #2A5AB0) !important;
     color: white !important;
     border: none !important;
     border-radius: 8px !important;
-    padding: 0.6rem 1.5rem !important;
+    padding: 0.55rem 1.4rem !important;
     transition: all 0.2s !important;
+    box-shadow: 0 2px 8px rgba(26,58,107,0.25) !important;
 }
-.stButton > button:hover { opacity: 0.88 !important; transform: translateY(-1px); }
+.stButton > button:hover { opacity: 0.9 !important; transform: translateY(-1px) !important; }
 
 .stDownloadButton > button {
-    font-family: 'Syne', sans-serif !important;
+    font-family: 'Inter', sans-serif !important;
     font-weight: 600 !important;
-    background: var(--surface2) !important;
-    color: var(--accent2) !important;
-    border: 1px solid var(--accent2) !important;
+    background: var(--surface) !important;
+    color: #1A6B45 !important;
+    border: 1px solid #1A6B45 !important;
     border-radius: 8px !important;
 }
 
 [data-testid="stFileUploader"] {
     background: var(--surface) !important;
-    border: 1px dashed var(--border) !important;
+    border: 2px dashed var(--border) !important;
     border-radius: 10px !important;
 }
 
 .section-tag {
     display: inline-block;
-    font-family: 'Syne', sans-serif;
+    font-family: 'Inter', sans-serif;
     font-size: 0.65rem;
     font-weight: 700;
     text-transform: uppercase;
-    letter-spacing: 0.15em;
-    padding: 3px 10px;
+    letter-spacing: 0.12em;
+    padding: 4px 10px;
     border-radius: 4px;
     margin-bottom: 0.5rem;
 }
-.tag-matched { background: var(--matched); color: var(--accent2); border: 1px solid var(--matched-border); }
-.tag-unmatched { background: var(--unmatched); color: var(--danger); border: 1px solid var(--unmatched-border); }
-.tag-partial { background: var(--partial); color: var(--warn); border: 1px solid var(--partial-border); }
-.tag-blue { background: #4f8eff22; color: var(--accent); border: 1px solid #4f8eff55; }
-.tag-vl { background: var(--vl-bg); color: var(--vl-color); border: 1px solid var(--vl-border); }
-.tag-cl { background: var(--cl-bg); color: var(--cl-color); border: 1px solid var(--cl-border); }
+.tag-matched   { background: var(--matched);   color: #1A6B45; border: 1px solid var(--matched-border); }
+.tag-unmatched { background: var(--unmatched); color: #A32035; border: 1px solid var(--unmatched-border); }
+.tag-partial   { background: var(--partial);   color: #B85C00; border: 1px solid var(--partial-border); }
+.tag-blue      { background: var(--vl-bg);     color: #1A3A6B; border: 1px solid var(--vl-border); }
+.tag-vl        { background: var(--vl-bg);     color: var(--vl-color); border: 1px solid var(--vl-border); }
+.tag-cl        { background: var(--cl-bg);     color: var(--cl-color); border: 1px solid var(--cl-border); }
 
 .info-box {
     background: var(--surface);
     border: 1px solid var(--border);
-    border-left: 3px solid var(--accent);
+    border-left: 4px solid #1A3A6B;
     border-radius: 6px;
-    padding: 0.75rem 1rem;
-    font-size: 0.8rem;
-    color: var(--muted);
+    padding: 0.85rem 1rem;
+    font-size: 0.82rem;
+    color: var(--text);
     margin-bottom: 1rem;
+    line-height: 1.6;
 }
 
 [data-testid="stAlert"] { border-radius: 8px !important; }
-
-[data-testid="stSelectbox"] > div, [data-testid="stMultiSelect"] > div {
-    background: var(--surface) !important;
-    border-color: var(--border) !important;
-    border-radius: 8px !important;
-}
 
 [data-testid="stNumberInput"] input {
     background: var(--surface) !important;
@@ -258,8 +226,22 @@ html, body, [class*="css"] {
 [data-testid="stExpander"] {
     background: var(--surface) !important;
     border: 1px solid var(--border) !important;
-    border-radius: 8px !important;
+    border-radius: 10px !important;
 }
+
+[data-testid="stTextInput"] input {
+    background: var(--surface) !important;
+    border-color: var(--border) !important;
+    color: var(--text) !important;
+    border-radius: 8px !important;
+    font-family: 'Inter', sans-serif !important;
+}
+
+/* Column mapping table */
+.col-map-table { width:100%; border-collapse:collapse; font-size:0.8rem; margin-top:0.5rem; }
+.col-map-table th { background:#1A3A6B; color:#fff; padding:7px 12px; text-align:left; }
+.col-map-table td { padding:6px 12px; border-bottom:1px solid var(--border); color:var(--text); }
+.col-map-table tr:nth-child(even) td { background:var(--surface2); }
 </style>
 """, unsafe_allow_html=True)
 
@@ -1707,52 +1689,107 @@ def main():
         </div>
         """, unsafe_allow_html=True)
 
-    # ── Sample Format Download ──
-    with st.expander("📥 Download Sample Format (if unsure about column names)"):
-        st.caption("Your files can have any vendor/customer name. The app auto-detects columns. Download these samples to see the expected format.")
-        s1, s2 = st.columns(2)
+    # ── Column Mapping Helper ──
+    with st.expander("⚙️ Column Mapping  |  📥 Download Sample Format", expanded=False):
+        st.markdown("""
+        <div class="info-box">
+        <b>How it works:</b> Upload any Excel ledger file — the app auto-detects your columns by keywords.
+        If your columns are not detected correctly, use the mapping dropdowns below to manually assign them.
+        You can also download a sample format to understand the expected structure.
+        </div>
+        """, unsafe_allow_html=True)
 
-        # Generate minimal sample VL Excel
+        samp1, samp2 = st.columns(2)
+
         vl_sample_buf = BytesIO()
-        vl_sample_df = pd.DataFrame({
+        pd.DataFrame({
             'Doc Date':       ['01-Apr-2025', '05-Apr-2025', '10-Apr-2025'],
             'Doc No':         ['INV/001',     'INV/002',     'PAY/001'],
             'Doc Type Name':  ['Tax Invoice', 'Tax Invoice', 'Payment'],
-            'Particulars':    ['Sale of goods', 'Sale of goods', 'NEFT payment'],
-            'Debit':          [10000,          15000,          0],
-            'Credit':         [0,              0,              8000],
-            'Closing Balance':[10000,          25000,          17000],
-        })
-        vl_sample_df.to_excel(vl_sample_buf, index=False)
-        s1.download_button(
-            '⬇️ Sample Vendor Ledger Format',
+            'Particulars':    ['Sale of goods','Sale of goods','NEFT payment received'],
+            'Debit':          [10000, 15000, 0],
+            'Credit':         [0, 0, 8000],
+            'Closing Balance':[10000, 25000, 17000],
+        }).to_excel(vl_sample_buf, index=False)
+        samp1.download_button('⬇️ Sample Vendor Ledger',
             data=vl_sample_buf.getvalue(),
             file_name='Sample_Vendor_Ledger.xlsx',
             mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-            use_container_width=True,
-            key='sample_vl',
-        )
+            use_container_width=True, key='sample_vl')
 
-        # Generate minimal sample CL Excel
         cl_sample_buf = BytesIO()
-        cl_sample_df = pd.DataFrame({
+        pd.DataFrame({
             'Document Date':  ['01-Apr-2025', '05-Apr-2025', '10-Apr-2025'],
             'Document Type':  ['Tax Invoice', 'Tax Invoice', 'Payment'],
             'Document No':    ['INV/001',     'INV/002',     'PAY/001'],
-            'Debit (LC)':     [0,             0,             8000],
-            'Credit (LC)':    [10000,         15000,         0],
-            'Closing Balance':[-10000,        -25000,        -17000],
-        })
-        cl_sample_df.to_excel(cl_sample_buf, index=False)
-        s2.download_button(
-            '⬇️ Sample Customer Ledger Format',
+            'Debit (LC)':     [0, 0, 8000],
+            'Credit (LC)':    [10000, 15000, 0],
+            'Closing Balance':[-10000, -25000, -17000],
+        }).to_excel(cl_sample_buf, index=False)
+        samp2.download_button('⬇️ Sample Customer Ledger',
             data=cl_sample_buf.getvalue(),
             file_name='Sample_Customer_Ledger.xlsx',
             mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-            use_container_width=True,
-            key='sample_cl',
-        )
-        st.info("ℹ️ Your actual files can have different column names — the app auto-detects common variations like 'Doc. Date', 'Voucher No', 'Narration', 'Debit', 'Credit (LC)', 'Balance', etc.")
+            use_container_width=True, key='sample_cl')
+
+        st.markdown("---")
+        st.markdown("**Manual Column Mapping** — only needed if auto-detection is incorrect")
+
+        # Show mapping UI only if files are already uploaded and parsed
+        if 'vl_parsed' in st.session_state and 'cl_parsed' in st.session_state:
+            vl_cols_all = [c for c in st.session_state['vl_parsed'].columns if not c.startswith('_')]
+            cl_cols_all = [c for c in st.session_state['cl_parsed'].columns if not c.startswith('_')]
+            NONE = '(auto)'
+
+            m1, m2 = st.columns(2)
+            with m1:
+                st.markdown(f'<span class="section-tag tag-vl">📘 {VL} — Vendor Ledger Columns</span>', unsafe_allow_html=True)
+                vl_map_date = st.selectbox('Doc Date column', [NONE]+vl_cols_all, key='vl_map_date')
+                vl_map_no   = st.selectbox('Doc No column',   [NONE]+vl_cols_all, key='vl_map_no')
+                vl_map_type = st.selectbox('Doc Type column', [NONE]+vl_cols_all, key='vl_map_type')
+                vl_map_part = st.selectbox('Particulars column', [NONE]+vl_cols_all, key='vl_map_part')
+                vl_map_deb  = st.selectbox('Debit column',    [NONE]+vl_cols_all, key='vl_map_deb')
+                vl_map_cred = st.selectbox('Credit column',   [NONE]+vl_cols_all, key='vl_map_cred')
+                vl_map_clos = st.selectbox('Closing Balance column', [NONE]+vl_cols_all, key='vl_map_clos')
+            with m2:
+                st.markdown(f'<span class="section-tag tag-cl">📗 {CL} — Customer Ledger Columns</span>', unsafe_allow_html=True)
+                cl_map_date = st.selectbox('Doc Date column', [NONE]+cl_cols_all, key='cl_map_date')
+                cl_map_no   = st.selectbox('Doc No column',   [NONE]+cl_cols_all, key='cl_map_no')
+                cl_map_type = st.selectbox('Doc Type column', [NONE]+cl_cols_all, key='cl_map_type')
+                cl_map_deb  = st.selectbox('Debit column',    [NONE]+cl_cols_all, key='cl_map_deb')
+                cl_map_cred = st.selectbox('Credit column',   [NONE]+cl_cols_all, key='cl_map_cred')
+                cl_map_clos = st.selectbox('Closing Balance column', [NONE]+cl_cols_all, key='cl_map_clos')
+
+            if st.button('✅ Apply Manual Column Mapping', key='apply_col_map'):
+                def apply_map(df, mapping):
+                    """Re-map columns based on user selections."""
+                    df = df.copy()
+                    for target, src in mapping.items():
+                        if src and src != NONE and src in df.columns and src != target:
+                            df[target] = df[src]
+                    # Re-run numeric conversions
+                    for nc in ['debit','credit','closing']:
+                        if nc in df.columns:
+                            df[nc] = pd.to_numeric(df[nc], errors='coerce').fillna(0 if nc != 'closing' else np.nan)
+                    if 'doc_no' in df.columns:
+                        df['doc_no_clean'] = df['doc_no'].apply(clean_doc_number)
+                    if 'doc_date' in df.columns:
+                        df['doc_date'] = pd.to_datetime(df['doc_date'], errors='coerce', dayfirst=True)
+                        df['period'] = df['doc_date'].apply(get_period)
+                    return df
+
+                vl_remap = {'doc_date':vl_map_date,'doc_no':vl_map_no,'doc_type':vl_map_type,
+                            'particulars':vl_map_part,'debit':vl_map_deb,'credit':vl_map_cred,'closing':vl_map_clos}
+                cl_remap = {'doc_date':cl_map_date,'doc_no':cl_map_no,'doc_type':cl_map_type,
+                            'debit':cl_map_deb,'credit':cl_map_cred,'closing':cl_map_clos}
+
+                st.session_state['vl_parsed'] = apply_map(st.session_state['vl_parsed'], vl_remap)
+                st.session_state['cl_parsed'] = apply_map(st.session_state['cl_parsed'], cl_remap)
+                st.session_state.pop('results', None)
+                st.session_state.pop('excel_data', None)
+                st.success('✅ Column mapping applied. Click Run Reconciliation.')
+        else:
+            st.info('Upload both ledger files first to use manual column mapping.')
 
     # File upload with vendor/customer color coding
     col1, col2 = st.columns(2)
@@ -1818,6 +1855,17 @@ def main():
         cl_closing = cl['closing'].dropna().iloc[-1] if 'closing' in cl.columns and not cl['closing'].dropna().empty else None
 
     st.success(f"✅ {VL}: **{len(vl)}** rows  ·  {CL}: **{len(cl)}** rows")
+
+    # Show auto-detected column mapping so user can verify
+    vl_detected = {k: k for k in ['doc_date','doc_no','doc_type','debit','credit','closing'] if k in vl.columns}
+    cl_detected = {k: k for k in ['doc_date','doc_no','doc_type','debit','credit','closing'] if k in cl.columns}
+    missing_vl = [k for k in ['doc_date','doc_no','doc_type','debit','credit'] if k not in vl.columns]
+    missing_cl = [k for k in ['doc_date','doc_no','doc_type','debit','credit'] if k not in cl.columns]
+    if missing_vl or missing_cl:
+        st.warning(f"⚠️ Some columns could not be auto-detected. "
+                   f"{'VL missing: ' + ', '.join(missing_vl) if missing_vl else ''} "
+                   f"{'CL missing: ' + ', '.join(missing_cl) if missing_cl else ''}. "
+                   f"Use **Column Mapping** above to fix this.")
 
     # Show both closing balances side by side
     cb1, cb2 = st.columns(2)
