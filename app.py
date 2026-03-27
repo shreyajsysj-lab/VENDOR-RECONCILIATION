@@ -345,161 +345,237 @@ def extract_ref_from_particulars(particulars):
 # LOAD & PARSE
 # ─────────────────────────────────────────────
 
-def _get_closing_from_raw(df_raw):
+def _detect_header_row(df):
     """
-    Extract closing balance from the raw (unfiltered) DataFrame.
-    Looks for a column whose name contains 'closing' or 'balance',
-    returns the last non-null numeric value from that column.
-    Works for ANY ledger format — not vendor/customer specific.
+    Scan rows to find the header row — the row where we see
+    column-like labels (date, debit, credit, no, doc, etc).
+    Works for ANY ledger format from any ERP system.
+    Returns integer row index (0-based).
     """
-    for c in df_raw.columns:
-        cl = str(c).lower()
-        if 'closing' in cl or ('balance' in cl and 'opening' not in cl):
-            series = pd.to_numeric(df_raw[c], errors='coerce').dropna()
-            if not series.empty:
-                return float(series.iloc[-1])
+    HEADER_KEYWORDS = ['date', 'debit', 'credit', 'doc', 'document',
+                       'voucher', 'vch', 'amount', 'balance', 'no.',
+                       'number', 'type', 'particular', 'narration']
+    best_row = 0
+    best_score = 0
+    # Only scan first 20 rows
+    for i in range(min(20, len(df))):
+        try:
+            row_vals = df.iloc[i].tolist()
+        except Exception:
+            continue
+        score = 0
+        for v in row_vals:
+            try:
+                s = str(v).lower().strip()
+                if any(k in s for k in HEADER_KEYWORDS):
+                    score += 1
+            except Exception:
+                continue
+        if score > best_score:
+            best_score = score
+            best_row = i
+    return best_row
+
+
+def _get_closing_from_raw(df):
+    """
+    Find closing balance = last non-null numeric value from
+    a column whose name contains 'closing' or 'balance'.
+    Works for any ledger format.
+    """
+    try:
+        for c in df.columns:
+            col_name = str(c).lower().strip()
+            if 'closing' in col_name or ('balance' in col_name and 'opening' not in col_name):
+                series = pd.to_numeric(df[c], errors='coerce').dropna()
+                if not series.empty:
+                    return float(series.iloc[-1])
+    except Exception:
+        pass
     return None
 
 
-def _detect_header_row(df, keywords_any=None, keywords_all=None):
+def _parse_ledger_raw(raw_df):
     """
-    Generic header row detector — scans rows for keyword patterns.
-    keywords_any: list of strings — row qualifies if ANY found
-    keywords_all: list of lists — row qualifies if ALL items in any sublist found
-    Returns row index or 0 as fallback.
+    Given a raw DataFrame (no header), detect header row,
+    set column names, capture closing balance from ALL rows
+    (before doc_no filtering), and return (df_with_headers, closing_val).
     """
-    for i, row in df.iterrows():
-        vals = [str(v).lower().strip() for v in row if not pd.isna(v)]
-        combined = ' '.join(vals)
-        if keywords_any and any(k in combined for k in keywords_any):
-            return i
-        if keywords_all:
-            for group in keywords_all:
-                if all(any(k in v for v in vals) for k in group):
-                    return i
-    return 0
+    header_row_idx = _detect_header_row(raw_df)
+
+    # Extract column names from header row — safely convert each cell to string
+    try:
+        header_vals = raw_df.iloc[header_row_idx].tolist()
+        col_names = [str(v).strip() if not (isinstance(v, float) and pd.isna(v)) else f'Col_{i}'
+                     for i, v in enumerate(header_vals)]
+    except Exception:
+        col_names = [f'Col_{i}' for i in range(len(raw_df.columns))]
+
+    # Data rows = everything after the header row
+    data_df = raw_df.iloc[header_row_idx + 1:].copy().reset_index(drop=True)
+    data_df.columns = col_names
+
+    # Capture closing balance from ALL data rows (before any filtering)
+    closing_val = _get_closing_from_raw(data_df)
+
+    return data_df, closing_val
+
+
+def _map_columns(df):
+    """
+    Map raw column names to standardised internal names
+    (doc_date, doc_no, doc_type, particulars, debit, credit, closing).
+    Works for any ERP export format — Tally, SAP, Oracle, Zoho, QuickBooks, custom.
+    """
+    col_map = {}
+    already_mapped = set()   # prevent mapping two cols to same target
+
+    def try_map(target, col_name):
+        if target not in already_mapped:
+            col_map[col_name] = target
+            already_mapped.add(target)
+
+    for c in df.columns:
+        cl = str(c).lower().strip()
+
+        # Date column
+        if 'date' in cl and 'doc_date' not in already_mapped:
+            try_map('doc_date', c)
+
+        # Doc Type — must check before doc_no to avoid conflict
+        elif ('type' in cl or 'nature' in cl) and 'doc_type' not in already_mapped \
+                and 'date' not in cl:
+            try_map('doc_type', c)
+
+        # Doc No — broad match: no, num, number, ref, voucher, vch, details, doc no
+        elif 'doc_no' not in already_mapped and 'date' not in cl and 'type' not in cl \
+                and any(k in cl for k in ['no.','no ','num','voucher','vch','ref','detail',
+                                           'invoice no','bill no']):
+            try_map('doc_no', c)
+
+        # Particulars / Narration / Description
+        elif any(k in cl for k in ['particular','narration','description','remarks','remark']) \
+                and 'particulars' not in already_mapped:
+            try_map('particulars', c)
+
+        # Opening balance — skip (don't map to closing)
+        elif 'opening' in cl:
+            pass
+
+        # Debit — check it's not "credit" too
+        elif 'debit' in cl and 'credit' not in cl and 'debit' not in already_mapped:
+            try_map('debit', c)
+
+        # Credit
+        elif 'credit' in cl and 'debit' not in cl and 'credit' not in already_mapped:
+            try_map('credit', c)
+
+        # Closing / Balance (not opening)
+        elif ('closing' in cl or 'balance' in cl) and 'opening' not in cl \
+                and 'closing' not in already_mapped:
+            try_map('closing', c)
+
+    return col_map
+
+
+def _load_any_ledger(file, is_vendor=True):
+    """
+    Universal ledger loader — works with ANY Excel format from any ERP.
+    Reads raw, detects header, maps columns, handles all edge cases safely.
+    """
+    # Read all as strings first to avoid type-inference errors
+    try:
+        raw = pd.read_excel(file, header=None, dtype=str)
+    except Exception:
+        raw = pd.read_excel(file, header=None)
+
+    # Detect header row
+    header_idx = _detect_header_row(raw)
+
+    # Build column names safely
+    try:
+        hdr_series = raw.iloc[header_idx]
+        col_names = []
+        for i, v in enumerate(hdr_series):
+            try:
+                cell = str(v).strip() if v is not None and not (isinstance(v, float) and pd.isna(v)) else ''
+                col_names.append(cell if cell else f'_Col{i}')
+            except Exception:
+                col_names.append(f'_Col{i}')
+    except Exception:
+        col_names = [f'_Col{i}' for i in range(len(raw.columns))]
+
+    # Data = rows after header
+    data = raw.iloc[header_idx + 1:].copy().reset_index(drop=True)
+    data.columns = col_names
+
+    # Capture closing balance BEFORE filtering (closing row has no doc no)
+    closing_val = _get_closing_from_raw(data)
+
+    # Map columns
+    col_map = _map_columns(data)
+    df = data.rename(columns=col_map)
+
+    # Ensure all needed columns exist
+    needed = ['doc_date','doc_no','doc_type','debit','credit','closing']
+    if is_vendor:
+        needed += ['particulars']
+    for col in needed:
+        if col not in df.columns:
+            df[col] = ''
+
+    # Safe conversions — each wrapped so one bad column cannot crash the whole load
+    try:
+        df['doc_date'] = pd.to_datetime(df['doc_date'], errors='coerce', dayfirst=True)
+    except Exception:
+        df['doc_date'] = pd.NaT
+
+    for num_col, fill in [('debit', 0), ('credit', 0)]:
+        try:
+            df[num_col] = pd.to_numeric(df[num_col], errors='coerce').fillna(fill)
+        except Exception:
+            df[num_col] = fill
+
+    try:
+        df['closing'] = pd.to_numeric(df['closing'], errors='coerce')
+    except Exception:
+        df['closing'] = np.nan
+
+    # doc_no: safe string conversion
+    try:
+        df['doc_no'] = df['doc_no'].fillna('').astype(str).str.strip()
+        df['doc_no'] = df['doc_no'].replace({'nan': '', 'None': '', 'NaN': ''})
+    except Exception:
+        df['doc_no'] = ''
+
+    df['doc_no_clean'] = df['doc_no'].apply(clean_doc_number)
+    df['period']       = df['doc_date'].apply(get_period)
+
+    if is_vendor:
+        try:
+            df['particulars'] = df['particulars'].fillna('').astype(str)
+        except Exception:
+            df['particulars'] = ''
+        df['particulars_ref'] = df['particulars'].apply(extract_ref_from_particulars)
+
+    # Filter to rows that have a doc number
+    df = df[df['doc_no_clean'].astype(str) != ''].reset_index(drop=True)
+    df['_idx']       = df.index
+    df['_remark']    = ''
+    df['_match_ref'] = ''
+
+    return df, closing_val
 
 
 def load_vendor_ledger(file):
-    raw = pd.read_excel(file, header=None)
-
-    # Generic header detection — any row with date+doc keywords OR debit+credit
-    header_row = _detect_header_row(raw,
-        keywords_all=[
-            ['doc', 'date'],
-            ['debit', 'credit'],
-        ]
-    )
-
-    # Capture closing balance from raw BEFORE any row filtering
-    raw_with_headers = raw.iloc[header_row:].copy()
-    raw_with_headers.columns = [str(c).strip() for c in raw.iloc[header_row]]
-    raw_data_only = raw_with_headers.iloc[1:].reset_index(drop=True)
-    vl_closing = _get_closing_from_raw(raw_data_only)
-
-    df = raw_data_only.copy()
-    df.columns = [str(c).strip() for c in df.columns]
-
-    col_map = {}
-    for c in df.columns:
-        cl = c.lower()
-        if 'doc' in cl and 'date' in cl:
-            col_map[c] = 'doc_date'
-        elif ('doc' in cl or 'voucher' in cl or 'vch' in cl) and ('no' in cl or 'num' in cl or 'ref' in cl) and 'date' not in cl and 'type' not in cl:
-            col_map[c] = 'doc_no'
-        elif ('doc' in cl or 'voucher' in cl or 'vch' in cl) and 'type' in cl:
-            col_map[c] = 'doc_type'
-        elif 'particular' in cl or 'narration' in cl or 'description' in cl:
-            col_map[c] = 'particulars'
-        elif 'opening' in cl:
-            col_map[c] = 'opening'
-        elif 'debit' in cl and 'credit' not in cl:
-            col_map[c] = 'debit'
-        elif 'credit' in cl and 'debit' not in cl:
-            col_map[c] = 'credit'
-        elif 'closing' in cl or ('balance' in cl and 'opening' not in cl):
-            col_map[c] = 'closing'
-    df = df.rename(columns=col_map)
-
-    needed = ['doc_date', 'doc_no', 'doc_type', 'debit', 'credit', 'particulars', 'closing']
-    for col in needed:
-        if col not in df.columns:
-            df[col] = np.nan
-
-    df['doc_date'] = pd.to_datetime(df['doc_date'], errors='coerce', dayfirst=True)
-    df['debit']   = pd.to_numeric(df['debit'],   errors='coerce').fillna(0)
-    df['credit']  = pd.to_numeric(df['credit'],  errors='coerce').fillna(0)
-    df['closing'] = pd.to_numeric(df['closing'], errors='coerce')
-    df['doc_no_clean']    = df['doc_no'].apply(clean_doc_number)
-    df['period']          = df['doc_date'].apply(get_period)
-    df['particulars_ref'] = df['particulars'].apply(extract_ref_from_particulars)
-    df = df[df['doc_no_clean'] != ''].reset_index(drop=True)
-    df['_idx']      = df.index
-    df['_remark']   = ''
-    df['_match_ref'] = ''
-    # Store closing balance as attribute accessible after load
-    df._vl_closing  = vl_closing
+    df, closing = _load_any_ledger(file, is_vendor=True)
+    df._vl_closing = closing
     return df
 
 
 def load_customer_ledger(file):
-    raw = pd.read_excel(file, header=None)
-
-    # Generic header detection — any format with date + debit/credit columns
-    header_row = _detect_header_row(raw,
-        keywords_all=[
-            ['date', 'debit'],
-            ['date', 'credit'],
-            ['document', 'debit'],
-            ['document', 'credit'],
-            ['debit', 'credit'],
-        ]
-    )
-
-    # Capture closing balance from raw BEFORE any row filtering
-    raw_with_headers = raw.iloc[header_row:].copy()
-    raw_with_headers.columns = [str(c).strip() for c in raw.iloc[header_row]]
-    raw_data_only = raw_with_headers.iloc[1:].reset_index(drop=True)
-    cl_closing = _get_closing_from_raw(raw_data_only)
-
-    df = raw_data_only.copy()
-    df.columns = [str(c).strip() for c in df.columns]
-
-    col_map = {}
-    for c in df.columns:
-        cl = c.lower()
-        if 'date' in cl:
-            col_map[c] = 'doc_date'
-        elif 'type' in cl:
-            col_map[c] = 'doc_type'
-        elif ('no' in cl or 'detail' in cl or 'num' in cl or 'ref' in cl or 'voucher' in cl or 'vch' in cl) \
-                and 'date' not in cl and 'type' not in cl:
-            col_map[c] = 'doc_no'
-        elif 'debit' in cl and 'credit' not in cl:
-            col_map[c] = 'debit'
-        elif 'credit' in cl and 'debit' not in cl:
-            col_map[c] = 'credit'
-        elif 'closing' in cl or ('balance' in cl and 'opening' not in cl):
-            col_map[c] = 'closing'
-    df = df.rename(columns=col_map)
-
-    needed = ['doc_date', 'doc_no', 'doc_type', 'debit', 'credit', 'closing']
-    for col in needed:
-        if col not in df.columns:
-            df[col] = np.nan
-
-    df['doc_date'] = pd.to_datetime(df['doc_date'], errors='coerce', dayfirst=True)
-    df['debit']   = pd.to_numeric(df['debit'],   errors='coerce').fillna(0)
-    df['credit']  = pd.to_numeric(df['credit'],  errors='coerce').fillna(0)
-    df['closing'] = pd.to_numeric(df['closing'], errors='coerce')
-    df['doc_no_clean'] = df['doc_no'].apply(clean_doc_number)
-    df['period']       = df['doc_date'].apply(get_period)
-    df = df[df['doc_no_clean'] != ''].reset_index(drop=True)
-    df['_idx']       = df.index
-    df['_remark']    = ''
-    df['_match_ref'] = ''
-    # Store closing balance
-    df._cl_closing   = cl_closing
+    df, closing = _load_any_ledger(file, is_vendor=False)
+    df._cl_closing = closing
     return df
 
 # ─────────────────────────────────────────────
