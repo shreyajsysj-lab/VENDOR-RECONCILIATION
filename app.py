@@ -1772,11 +1772,16 @@ def main():
 
     st.success(f"✅ Files parsed — {VL}: **{len(vl)} rows** · {CL}: **{len(cl)} rows**")
 
+    # Always show the most up-to-date closing balance (session_state is the source of truth)
+    _vl_cb_display = st.session_state.get('vl_closing') or vl_closing
+    _cl_cb_display = st.session_state.get('cl_closing') or cl_closing
     cb1, cb2 = st.columns(2)
     with cb1:
-        st.info(f"📘 **{VL} Closing Balance:** {fmt_inr(vl_closing) if vl_closing is not None else 'Not detected'}")
+        _vl_str = fmt_inr(_vl_cb_display) if _vl_cb_display is not None else 'Not detected'
+        st.info(f"📘 **{VL} Closing Balance:** {_vl_str}")
     with cb2:
-        st.info(f"📗 **{CL} Closing Balance:** {fmt_inr(cl_closing) if cl_closing is not None else 'Not detected'}")
+        _cl_str = fmt_inr(_cl_cb_display) if _cl_cb_display is not None else 'Not detected'
+        st.info(f"📗 **{CL} Closing Balance:** {_cl_str}")
 
     # ── COLUMN MAPPING REVIEW (KEY FEATURE) ──
     with st.expander("🤖 Review AI-Detected Column Mapping", expanded=True):
@@ -1865,6 +1870,7 @@ def main():
 
         results['vl_annotated'] = safe_records(results['vl_annotated'])
         results['cl_annotated'] = safe_records(results['cl_annotated'])
+
         def safe_float(val):
             try:
                 f = float(val)
@@ -1872,8 +1878,20 @@ def main():
             except (TypeError, ValueError):
                 return None
 
-        results['vl_closing'] = safe_float(vl_closing)
-        results['cl_closing'] = safe_float(cl_closing)
+        # Always read closing balance from session_state (set during file upload).
+        # Do NOT use the local vl_closing / cl_closing variables here — they may
+        # be stale or None if something went wrong during the run.
+        vl_cb = safe_float(st.session_state.get('vl_closing')) or safe_float(vl_closing)
+        cl_cb = safe_float(st.session_state.get('cl_closing')) or safe_float(cl_closing)
+        results['vl_closing'] = vl_cb
+        results['cl_closing'] = cl_cb
+
+        # Persist closing back to session_state so it survives re-renders
+        if vl_cb is not None:
+            st.session_state['vl_closing'] = vl_cb
+        if cl_cb is not None:
+            st.session_state['cl_closing'] = cl_cb
+
         results['vl_name'] = VL
         results['cl_name'] = CL
         st.session_state['results'] = results
@@ -1888,8 +1906,23 @@ def main():
     CL = results.get('cl_name', cname) or cname
     vl_ann_df = pd.DataFrame(results['vl_annotated'])
     cl_ann_df = pd.DataFrame(results['cl_annotated'])
-    vl_closing_val = results.get('vl_closing')
-    cl_closing_val = results.get('cl_closing')
+
+    # Prefer session_state closing (set at upload time) over results closing.
+    # This ensures the closing balance is never lost after reconciliation runs.
+    def _pick_closing(session_key, results_key):
+        ss_val = st.session_state.get(session_key)
+        res_val = results.get(results_key)
+        for v in [ss_val, res_val]:
+            try:
+                f = float(v)
+                if f == f:  # not NaN
+                    return f
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    vl_closing_val = _pick_closing('vl_closing', 'vl_closing')
+    cl_closing_val = _pick_closing('cl_closing', 'cl_closing')
 
     cn_matched = [r for r in results['dn_matched'] if 'Credit Note' in str(r.get('Match Type', ''))]
     dn_only_matched = [r for r in results['dn_matched'] if 'Credit Note' not in str(r.get('Match Type', ''))]
