@@ -375,40 +375,69 @@ def _detect_header_row(df):
     return best_row
 
 
-def _get_closing_from_raw(df):
+def _extract_closing_balance(data_df, col_names):
     """
-    Try multiple strategies to find closing balance:
-    1. Column named 'closing' (after mapping)
-    2. Any column with 'closing' or 'balance' (not opening) in name
-    3. Last numeric value in the last numeric-looking column
+    Extract closing balance from raw data (BEFORE any row filtering).
+
+    Indian ERP ledgers (Tally, SAP, Oracle, Busy) typically have a
+    footer row like:  "Closing Balance | | | | 1,23,456"
+    This row has no date and no doc number, so it gets DROPPED when we
+    filter rows — we must capture the closing balance BEFORE that filter.
+
+    Strategies (in order):
+    1. Footer keyword row  — last row containing 'closing'/ 'total' label
+    2. Named balance column — last value from col named 'closing'/'balance'
+    3. Rightmost numeric column fallback
     """
+    df = data_df.copy()
+
+    # Strategy 1: scan last 20 rows for a footer / closing label row
     try:
-        # Strategy 1: already mapped 'closing' column
-        if 'closing' in df.columns:
-            series = pd.to_numeric(df['closing'], errors='coerce').dropna()
-            if not series.empty:
-                return float(series.iloc[-1])
+        CLOSING_KW = ['closing', 'closing balance', 'total', 'grand total',
+                      'net balance', 'balance c/f', 'balance c/d', 'bal c/f']
+        for row_idx in range(len(df) - 1, max(len(df) - 25, -1), -1):
+            row = df.iloc[row_idx]
+            row_str = ' '.join(str(v).lower().strip()
+                               for v in row.values
+                               if str(v).strip().lower() not in ['', 'nan', 'none'])
+            if any(kw in row_str for kw in CLOSING_KW):
+                # Found the footer row — pick the rightmost non-zero numeric value
+                for v in reversed(list(row.values)):
+                    try:
+                        f = float(str(v).replace(',', '').strip())
+                        if f == f:   # not NaN
+                            return f
+                    except Exception:
+                        continue
     except Exception:
         pass
+
+    # Strategy 2: named balance/closing column — last non-null value
     try:
-        # Strategy 2: keyword search on column names
-        for c in df.columns:
-            col_name = str(c).lower().strip()
-            if 'closing' in col_name or ('balance' in col_name and 'opening' not in col_name):
+        for c in col_names:
+            cl = str(c).lower().strip()
+            if 'closing' in cl or ('balance' in cl and 'opening' not in cl):
                 series = pd.to_numeric(df[c], errors='coerce').dropna()
                 if not series.empty:
                     return float(series.iloc[-1])
     except Exception:
         pass
+
+    # Strategy 3: rightmost column that is ≥40% numeric
     try:
-        # Strategy 3: last column that looks numeric overall
-        for c in reversed(list(df.columns)):
+        for c in reversed(col_names):
             series = pd.to_numeric(df[c], errors='coerce').dropna()
-            if len(series) >= max(1, len(df) * 0.3):   # at least 30% numeric
+            if len(series) >= max(1, int(len(df) * 0.4)):
                 return float(series.iloc[-1])
     except Exception:
         pass
+
     return None
+
+
+def _get_closing_from_raw(df):
+    """Legacy wrapper — used after mapping is applied."""
+    return _extract_closing_balance(df, list(df.columns))
 
 
 def _rule_based_map_columns(df):
@@ -489,7 +518,9 @@ def _load_any_ledger_smart(file, is_vendor=True, override_mapping=None):
     data.columns = col_names
     raw_columns = list(col_names)
 
-    closing_val = _get_closing_from_raw(data)
+    # ── Capture closing balance NOW from raw data (before any row is dropped) ──
+    # The closing balance footer row has no doc_no and will be removed later.
+    closing_val = _extract_closing_balance(data, col_names)
 
     # Build sample rows for AI
     sample_rows = []
@@ -551,11 +582,12 @@ def _load_any_ledger_smart(file, is_vendor=True, override_mapping=None):
             df['particulars'] = ''
         df['particulars_ref'] = df['particulars'].apply(extract_ref_from_particulars)
 
-    # Re-derive closing balance from the mapped df (more accurate than raw scan)
-    closing_from_mapped = _get_closing_from_raw(df)
-    if closing_from_mapped is not None:
-        closing_val = closing_from_mapped
+    # ── Second attempt: scan MAPPED df (footer row still present here) ──
+    # Only use this if the raw scan above returned None
+    if closing_val is None:
+        closing_val = _extract_closing_balance(df, list(df.columns))
 
+    # NOW drop rows without a doc number (this removes the footer/closing row)
     df = df[df['doc_no_clean'].astype(str) != ''].reset_index(drop=True)
     df['_idx'] = df.index
     df['_remark'] = ''
