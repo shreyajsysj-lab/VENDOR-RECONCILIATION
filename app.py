@@ -1472,8 +1472,15 @@ def main():
 
         results['vl_annotated'] = safe_records(results['vl_annotated'])
         results['cl_annotated'] = safe_records(results['cl_annotated'])
-        results['vl_closing'] = float(vl_closing) if vl_closing is not None else None
-        results['cl_closing'] = float(cl_closing) if cl_closing is not None else None
+        def safe_float(val):
+            try:
+                f = float(val)
+                return None if (f != f) else f  # NaN check
+            except (TypeError, ValueError):
+                return None
+
+        results['vl_closing'] = safe_float(vl_closing)
+        results['cl_closing'] = safe_float(cl_closing)
         results['vl_name'] = VL
         results['cl_name'] = CL
         st.session_state['results'] = results
@@ -1658,8 +1665,14 @@ def main():
     # Reconciliation Statement
     st.markdown("---")
     st.markdown("### 📋 Ledger Reconciliation Statement")
-    vl_bal     = float(vl_closing_val) if vl_closing_val else 0.0
-    cl_bal_act = float(cl_closing_val) if cl_closing_val is not None else 0.0
+    def _to_float(v, default=0.0):
+        try:
+            f = float(v)
+            return default if (f != f) else f  # NaN check
+        except (TypeError, ValueError):
+            return default
+    vl_bal     = _to_float(vl_closing_val)
+    cl_bal_act = _to_float(cl_closing_val)
     adj_inv_vl = inv_un_vl_val
     adj_cn_vl  = cn_matched_val
     adj_dn_cl  = safe_sum(results['dn_unmatched_cl'], 'Debit') + safe_sum(results['dn_unmatched_cl'], 'Credit')
