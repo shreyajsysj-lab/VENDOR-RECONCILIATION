@@ -377,66 +377,77 @@ def _detect_header_row(df):
 
 def _extract_closing_balance(data_df, col_names):
     """
-    Extract closing balance from raw data (BEFORE any row filtering).
+    Extract closing balance from full raw data BEFORE any row is filtered out.
 
-    Indian ERP ledgers (Tally, SAP, Oracle, Busy) typically have a
-    footer row like:  "Closing Balance | | | | 1,23,456"
-    This row has no date and no doc number, so it gets DROPPED when we
-    filter rows — we must capture the closing balance BEFORE that filter.
-
-    Strategies (in order):
-    1. Footer keyword row  — last row containing 'closing'/ 'total' label
-    2. Named balance column — last value from col named 'closing'/'balance'
-    3. Rightmost numeric column fallback
+    Priority order:
+    1. Explicit footer row  — last 10 rows where the ONLY text cell contains
+       'closing' or 'balance c/' (very strict to avoid false positives).
+    2. Named closing/balance column — last numeric value.
+    3. Named credit/debit column pair — derive net from last row.
+    4. Return None (caller will handle missing value).
     """
     df = data_df.copy()
 
-    # Strategy 1: scan last 20 rows for a footer / closing label row
+    # Strategy 1: strict footer row detection
+    # Only match rows where exactly one text cell says 'closing balance' / 'bal c/d' etc.
+    STRICT_KW = ['closing balance', 'closing bal', 'bal c/d', 'bal c/f',
+                 'balance c/d', 'balance c/f', 'closing stock', 'net balance']
     try:
-        CLOSING_KW = ['closing', 'closing balance', 'total', 'grand total',
-                      'net balance', 'balance c/f', 'balance c/d', 'bal c/f']
-        for row_idx in range(len(df) - 1, max(len(df) - 25, -1), -1):
+        for row_idx in range(len(df) - 1, max(len(df) - 15, -1), -1):
             row = df.iloc[row_idx]
-            row_str = ' '.join(str(v).lower().strip()
-                               for v in row.values
-                               if str(v).strip().lower() not in ['', 'nan', 'none'])
-            if any(kw in row_str for kw in CLOSING_KW):
-                # Found the footer row — pick the rightmost non-zero numeric value
+            text_cells = [str(v).lower().strip() for v in row.values
+                          if str(v).strip().lower() not in ['', 'nan', 'none']
+                          and not _is_numeric_str(str(v))]
+            # Strict: at least one text cell must be a closing-balance label
+            if any(any(kw in tc for kw in STRICT_KW) for tc in text_cells):
+                # Pick rightmost parseable number from this row
                 for v in reversed(list(row.values)):
-                    try:
-                        f = float(str(v).replace(',', '').strip())
-                        if f == f:   # not NaN
-                            return f
-                    except Exception:
-                        continue
+                    f = _try_parse_number(v)
+                    if f is not None:
+                        return f
     except Exception:
         pass
 
-    # Strategy 2: named balance/closing column — last non-null value
+    # Strategy 2: column named 'closing' / 'balance' (not 'opening')
     try:
-        for c in col_names:
-            cl = str(c).lower().strip()
-            if 'closing' in cl or ('balance' in cl and 'opening' not in cl):
-                series = pd.to_numeric(df[c], errors='coerce').dropna()
-                if not series.empty:
-                    return float(series.iloc[-1])
-    except Exception:
-        pass
-
-    # Strategy 3: rightmost column that is ≥40% numeric
-    try:
-        for c in reversed(col_names):
-            series = pd.to_numeric(df[c], errors='coerce').dropna()
-            if len(series) >= max(1, int(len(df) * 0.4)):
-                return float(series.iloc[-1])
+        BALANCE_KW = ['closing balance', 'closing bal', 'closing', 'balance',
+                      'running balance', 'cum balance', 'bal']
+        for kw in BALANCE_KW:
+            for c in col_names:
+                if kw in str(c).lower() and 'opening' not in str(c).lower():
+                    series = pd.to_numeric(df[c], errors='coerce').dropna()
+                    if not series.empty:
+                        return float(series.iloc[-1])
     except Exception:
         pass
 
     return None
 
 
+def _is_numeric_str(s):
+    """Return True if s looks like a number (possibly with commas/brackets)."""
+    try:
+        s2 = s.strip().replace(',', '').replace('(', '-').replace(')', '')
+        float(s2)
+        return True
+    except Exception:
+        return False
+
+
+def _try_parse_number(v):
+    """Try to parse a cell value as float, return None on failure."""
+    try:
+        s = str(v).strip().replace(',', '').replace('(', '-').replace(')', '')
+        f = float(s)
+        if f == f:  # not NaN
+            return f
+    except Exception:
+        pass
+    return None
+
+
 def _get_closing_from_raw(df):
-    """Legacy wrapper — used after mapping is applied."""
+    """Legacy wrapper."""
     return _extract_closing_balance(df, list(df.columns))
 
 
@@ -1878,19 +1889,17 @@ def main():
             except (TypeError, ValueError):
                 return None
 
-        # Always read closing balance from session_state (set during file upload).
-        # Do NOT use the local vl_closing / cl_closing variables here — they may
-        # be stale or None if something went wrong during the run.
-        vl_cb = safe_float(st.session_state.get('vl_closing')) or safe_float(vl_closing)
-        cl_cb = safe_float(st.session_state.get('cl_closing')) or safe_float(cl_closing)
-        results['vl_closing'] = vl_cb
-        results['cl_closing'] = cl_cb
-
-        # Persist closing back to session_state so it survives re-renders
-        if vl_cb is not None:
-            st.session_state['vl_closing'] = vl_cb
-        if cl_cb is not None:
-            st.session_state['cl_closing'] = cl_cb
+        # Store closing in results for Excel export.
+        # NEVER overwrite session_state['vl_closing'] / ['cl_closing'] here —
+        # those were set at upload time and are the source of truth.
+        def _sf(v):
+            try:
+                f = float(v)
+                return f if f == f else None
+            except Exception:
+                return None
+        results['vl_closing'] = _sf(st.session_state.get('vl_closing')) or _sf(vl_closing)
+        results['cl_closing'] = _sf(st.session_state.get('cl_closing')) or _sf(cl_closing)
 
         results['vl_name'] = VL
         results['cl_name'] = CL
@@ -1907,22 +1916,10 @@ def main():
     vl_ann_df = pd.DataFrame(results['vl_annotated'])
     cl_ann_df = pd.DataFrame(results['cl_annotated'])
 
-    # Prefer session_state closing (set at upload time) over results closing.
-    # This ensures the closing balance is never lost after reconciliation runs.
-    def _pick_closing(session_key, results_key):
-        ss_val = st.session_state.get(session_key)
-        res_val = results.get(results_key)
-        for v in [ss_val, res_val]:
-            try:
-                f = float(v)
-                if f == f:  # not NaN
-                    return f
-            except (TypeError, ValueError):
-                continue
-        return None
-
-    vl_closing_val = _pick_closing('vl_closing', 'vl_closing')
-    cl_closing_val = _pick_closing('cl_closing', 'cl_closing')
+    # vl_closing_val and cl_closing_val are set fresh just before display (after stat cards)
+    # using session_state as the source of truth. Initialize to None here.
+    vl_closing_val = None
+    cl_closing_val = None
 
     cn_matched = [r for r in results['dn_matched'] if 'Credit Note' in str(r.get('Match Type', ''))]
     dn_only_matched = [r for r in results['dn_matched'] if 'Credit Note' not in str(r.get('Match Type', ''))]
@@ -1949,6 +1946,47 @@ def main():
     total_matched_val = inv_matched_val + dn_matched_val + cn_matched_val + col_matched_val
     total_un_vl_val = inv_un_vl_val + safe_sum(results['dn_unmatched_vl'], 'Debit') + col_un_vl_val
     total_un_cl_val = inv_un_cl_val + safe_sum(results['dn_unmatched_cl'], 'Debit') + col_un_cl_val
+
+    # ── Always read closing from session_state (most reliable source) ──
+    # Do this right before display so it's always fresh
+    vl_closing_val = None
+    cl_closing_val = None
+    for _key in ['vl_closing']:
+        _v = st.session_state.get(_key)
+        if _v is not None:
+            try:
+                _f = float(_v)
+                if _f == _f:  # not NaN
+                    vl_closing_val = _f
+                    break
+            except Exception:
+                pass
+    for _key in ['cl_closing']:
+        _v = st.session_state.get(_key)
+        if _v is not None:
+            try:
+                _f = float(_v)
+                if _f == _f:
+                    cl_closing_val = _f
+                    break
+            except Exception:
+                pass
+    # Fallback to results dict if session_state doesn't have it
+    if vl_closing_val is None:
+        try: vl_closing_val = float(results.get('vl_closing') or 0) or None
+        except: pass
+    if cl_closing_val is None:
+        try: cl_closing_val = float(results.get('cl_closing') or 0) or None
+        except: pass
+
+    # ── Closing balance info boxes (always visible) ──
+    _cb1, _cb2 = st.columns(2)
+    with _cb1:
+        _vl_disp = fmt_inr(vl_closing_val) if vl_closing_val is not None else '⚠️ Not detected'
+        st.info(f"📘 **{VL} Closing Balance: {_vl_disp}**")
+    with _cb2:
+        _cl_disp = fmt_inr(cl_closing_val) if cl_closing_val is not None else '⚠️ Not detected'
+        st.info(f"📗 **{CL} Closing Balance: {_cl_disp}**")
 
     # Stats cards
     st.markdown(f"""
@@ -2091,14 +2129,9 @@ def main():
     # Reconciliation Statement
     st.markdown("---")
     st.markdown("### 📋 Ledger Reconciliation Statement")
-    def _to_float(v, default=0.0):
-        try:
-            f = float(v)
-            return default if (f != f) else f  # NaN check
-        except (TypeError, ValueError):
-            return default
-    vl_bal     = _to_float(vl_closing_val)
-    cl_bal_act = _to_float(cl_closing_val)
+    # vl_closing_val / cl_closing_val are already set fresh from session_state above
+    vl_bal     = float(vl_closing_val) if vl_closing_val is not None else 0.0
+    cl_bal_act = float(cl_closing_val) if cl_closing_val is not None else 0.0
     adj_inv_vl = inv_un_vl_val
     adj_cn_vl  = cn_matched_val
     adj_dn_cl  = safe_sum(results['dn_unmatched_cl'], 'Debit') + safe_sum(results['dn_unmatched_cl'], 'Credit')
