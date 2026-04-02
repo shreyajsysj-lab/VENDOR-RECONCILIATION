@@ -696,9 +696,10 @@ def run_reconciliation(vl_orig, cl_orig, tolerance=1.0):
         return None, ''
     results = {
         'invoice_matched': [],
-        'invoice_unmatched_vl': [],      # Tax Invoice / Sales Invoice only
+        'invoice_unmatched_vl': [],      # Tax Invoice / Sales Invoice only (pure invoices)
         'invoice_unmatched_cl': [],
         'cn_unmatched_vl': [],           # Credit Notes unmatched (Saleable Return, Non-Saleable, Credit Note etc.)
+        'dn_unmatched_vl_cn': [],        # VL Credit Notes that did NOT match any CL entry (separate annexure)
         'dn_matched': [],
         'dn_unmatched_vl': [],
         'dn_unmatched_cl': [],
@@ -971,7 +972,10 @@ def run_reconciliation(vl_orig, cl_orig, tolerance=1.0):
 
     cl_disc = cl[
         (~cl['_matched']) &
-        (cl.apply(lambda r: is_discount_or_prn(r.get('doc_type', ''), r.get('doc_no', '')), axis=1))
+        (
+            cl.apply(lambda r: is_discount_or_prn(r.get('doc_type', ''), r.get('doc_no', '')), axis=1) |
+            cl['doc_type'].apply(is_debit_note)   # include CL debit notes — counterpart of VL credit notes
+        )
     ].copy()
 
     # Also include any unmatched CL entries that could be credit note counterparts
@@ -1199,10 +1203,12 @@ def run_reconciliation(vl_orig, cl_orig, tolerance=1.0):
         elif is_collection(r.get('doc_type', '')):
             results['collection_unmatched_vl'].append(entry)
         elif is_credit_note(r.get('doc_type', '')):
-            # Credit Notes (Saleable Return, Non-Saleable, Credit Note, etc.) — separate bucket
+            # Credit Notes (Saleable Return, Non-Saleable, Credit Note, etc.)
+            # → go to both cn_unmatched_vl (for recon statement) AND dn_unmatched_vl_cn (for separate annexure)
             results['cn_unmatched_vl'].append(entry)
+            results['dn_unmatched_vl_cn'].append(entry)
         else:
-            # Only pure invoices / tax invoices / sales invoices
+            # Only pure tax invoices / sales invoices
             results['invoice_unmatched_vl'].append(entry)
 
     for idx, r in cl[~cl['_matched']].iterrows():
@@ -1362,7 +1368,7 @@ def build_excel(results, vl_orig, cl_orig, VL='Vendor', CL='Customer'):
     DS = 6  # data start row
     rows_data = [
         (f'Invoices', inv_vl_t, inv_vl_v, inv_m_c, inv_m_v, inv_cl_t, inv_cl_v, inv_ucl_c, inv_ucl_v, pct(inv_m_c,inv_vl_t), 'Matched by Document Number', 'Inv-Matched', '', 'EEF3FF'),
-        (f'Credit Notes ↔ Disc DN/PRN', cn_m_c, cn_m_v, cn_m_c, cn_m_v, '-', 0, '-', 0, pct(cn_m_c,max(cn_m_c,1)), f'{VL} Credit Note vs {CL} Discount/PRN', 'DN-CN-Matched', '', 'EEF3FF'),
+        (f'Credit Notes ↔ Disc DN/PRN', cn_m_c, cn_m_v, cn_m_c, cn_m_v, '-', 0, len(results.get('dn_unmatched_vl_cn',[])), ssum(results.get('dn_unmatched_vl_cn',[]),'Debit')+ssum(results.get('dn_unmatched_vl_cn',[]),'Credit'), pct(cn_m_c,max(cn_m_c+len(results.get('dn_unmatched_vl_cn',[])),1)), f'{VL} Credit Note vs {CL} Discount/PRN', 'DN-CN-Matched', '', 'EEF3FF'),
         (f'Debit Notes', dn_vl_t, dn_vl_v, dn_m_c, dn_m_v, dn_cl_t, dn_cl_v, dn_ucl_c, dn_ucl_v, pct(dn_m_c,dn_vl_t), 'Matched by Doc No / Period+Amount', 'DN-CN-Matched', '', 'EEF8F3'),
         (f'Collections', col_vl_t, col_vl_v, col_m_c, col_m_v, col_cl_t, col_cl_v, col_ucl_c, col_ucl_v, pct(col_m_c,col_vl_t), 'Matched by UTR / Period+Amount', 'Coll-Matched', '', 'EEF8F3'),
         (f'Reversal — Also in {CL} (A)', rcl_c, rcl_v, rcl_c, rcl_v, rcl_c, rcl_v, 0, 0, '⚠️ Review', f'Reversed in {VL} but in {CL}', 'AnnexA-CrossLedger', '', 'FFF8EC'),
@@ -1675,7 +1681,7 @@ def build_excel(results, vl_orig, cl_orig, VL='Vendor', CL='Customer'):
     write_sheet(f'Inv-Matched',                   results['invoice_matched'],         '1A6B45')
     write_sheet(f'Inv-Unmatch-{vl6}',             results['invoice_unmatched_vl'],    'A32035', is_vl_sheet=True)
     write_sheet(f'Inv-Unmatch-{cl6}',             results['invoice_unmatched_cl'],    'A32035', is_vl_sheet=False)
-    write_sheet(f'CN-Unmatch-{vl6}',              results['cn_unmatched_vl'],         'B85C00', is_vl_sheet=True)
+    write_sheet(f'CN-Unmatch-{vl6}',              results['dn_unmatched_vl_cn'],      'B85C00', is_vl_sheet=True)
     write_sheet(f'DN-CN-Matched',                 results['dn_matched'],              '1A6B45')
     write_sheet(f'DN-Unmatch-{vl6}',              results['dn_unmatched_vl'],         'A32035', is_vl_sheet=True)
     write_sheet(f'DN-Unmatch-{cl6}',              results['dn_unmatched_cl'],         'A32035', is_vl_sheet=False)
@@ -2334,7 +2340,8 @@ def main():
     dn_cl   = dn_matched_cnt  + dn_un_cl_cnt
     col_vl  = col_matched_cnt + col_un_vl_cnt
     col_cl  = col_matched_cnt + col_un_cl_cnt
-    cn_vl   = cn_matched_cnt  + len([r for r in results['invoice_unmatched_vl'] if is_credit_note(str(r.get('Type','')))])
+    cn_un_vl_cnt = len(results.get('dn_unmatched_vl_cn', []))
+    cn_vl   = cn_matched_cnt  + cn_un_vl_cnt
 
     inv_pct = round(inv_matched_cnt / inv_vl * 100, 1) if inv_vl else 0
     dn_pct  = round(dn_matched_cnt  / dn_vl  * 100, 1) if dn_vl  else 0
@@ -2506,27 +2513,39 @@ def main():
         st.markdown(f'<a name="inv"></a>', unsafe_allow_html=True)
         st.markdown(f'<span class="section-tag tag-matched">MATCHED INVOICES — {VL} vs {CL}</span>', unsafe_allow_html=True)
         display_df(results['invoice_matched'])
+        st.markdown("---")
         c1, c2 = st.columns(2)
         with c1:
-            st.markdown(f'<span class="section-tag tag-vl">UNMATCHED — {VL} (VENDOR LEDGER)</span>', unsafe_allow_html=True)
+            vl_inv_cnt = len(results['invoice_unmatched_vl'])
+            st.markdown(f'<span class="section-tag tag-vl">UNMATCHED TAX INVOICES — {VL} ({vl_inv_cnt} items)</span>', unsafe_allow_html=True)
+            st.caption("Pure tax invoices / sales invoices only. Credit Notes and Debit Notes are in the DN/CN tab.")
             display_df(results['invoice_unmatched_vl'])
         with c2:
-            st.markdown(f'<span class="section-tag tag-cl">UNMATCHED — {CL} (CUSTOMER LEDGER)</span>', unsafe_allow_html=True)
+            cl_inv_cnt = len(results['invoice_unmatched_cl'])
+            st.markdown(f'<span class="section-tag tag-cl">UNMATCHED TAX INVOICES — {CL} ({cl_inv_cnt} items)</span>', unsafe_allow_html=True)
             display_df(results['invoice_unmatched_cl'])
 
     with tabs[1]:
         st.markdown('<a name="cn_match"></a>', unsafe_allow_html=True)
-        st.markdown(f'<span class="section-tag tag-blue">🟡 CREDIT NOTES ({VL}) ↔ DISCOUNT DN / PRN ({CL})</span>', unsafe_allow_html=True)
+        st.markdown(f'<span class="section-tag tag-blue">🟡 MATCHED — CREDIT NOTES ({VL}) ↔ DEBIT NOTES / DISCOUNT / PRN ({CL})</span>', unsafe_allow_html=True)
         display_df(cn_matched)
         st.markdown("---")
-        st.markdown(f'<span class="section-tag tag-matched">MATCHED DEBIT NOTES</span>', unsafe_allow_html=True)
+        st.markdown(f'<span class="section-tag tag-matched">MATCHED DEBIT NOTES — {VL} vs {CL}</span>', unsafe_allow_html=True)
         display_df(dn_only_matched)
+        st.markdown("---")
+        cn_un_vl_cnt = len(results['dn_unmatched_vl_cn'])
+        st.markdown(f'<span class="section-tag tag-partial">🟠 UNMATCHED CREDIT NOTES — {VL} ({cn_un_vl_cnt} items)</span>', unsafe_allow_html=True)
+        st.caption(f"Credit Notes / Saleable Returns / Non-Saleable Returns in {VL} with no matching entry in {CL}.")
+        display_df(results['dn_unmatched_vl_cn'])
+        st.markdown("---")
         c1, c2 = st.columns(2)
         with c1:
-            st.markdown(f'<span class="section-tag tag-vl">UNMATCHED DEBIT NOTES — {VL}</span>', unsafe_allow_html=True)
+            dn_un_vl_cnt = len(results['dn_unmatched_vl'])
+            st.markdown(f'<span class="section-tag tag-vl">UNMATCHED DEBIT NOTES — {VL} ({dn_un_vl_cnt} items)</span>', unsafe_allow_html=True)
             display_df(results['dn_unmatched_vl'])
         with c2:
-            st.markdown(f'<span class="section-tag tag-cl">UNMATCHED DEBIT NOTES — {CL}</span>', unsafe_allow_html=True)
+            dn_un_cl_cnt2 = len(results['dn_unmatched_cl'])
+            st.markdown(f'<span class="section-tag tag-cl">UNMATCHED DEBIT NOTES — {CL} ({dn_un_cl_cnt2} items)</span>', unsafe_allow_html=True)
             display_df(results['dn_unmatched_cl'])
 
     with tabs[2]:
@@ -2563,11 +2582,12 @@ def main():
 
     with tabs[4]:
         all_unmatched = []
-        for item in results['invoice_unmatched_vl'] + results['dn_unmatched_vl'] + results['collection_unmatched_vl']:
+        for item in results['invoice_unmatched_vl'] + results['dn_unmatched_vl_cn'] + results['dn_unmatched_vl'] + results['collection_unmatched_vl']:
             item = dict(item); item['Ledger'] = VL; all_unmatched.append(item)
         for item in results['invoice_unmatched_cl'] + results['dn_unmatched_cl'] + results['collection_unmatched_cl']:
             item = dict(item); item['Ledger'] = CL; all_unmatched.append(item)
         st.markdown(f'<span class="section-tag tag-unmatched">ALL UNMATCHED ITEMS — {VL} & {CL}</span>', unsafe_allow_html=True)
+        st.caption("Includes: Tax Invoices, Credit Notes (VL), Debit Notes, Collections — all unmatched entries.")
         display_df(all_unmatched)
 
     with tabs[5]:
