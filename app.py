@@ -285,6 +285,37 @@ def is_debit_note(doc_type):
     s = str(doc_type).upper()
     return any(k in s for k in ['DEBIT NOTE', 'DN', 'DEBIT MEMO'])
 
+def is_debit_note_with_tax(doc_type):
+    if pd.isna(doc_type):
+        return False
+    s = str(doc_type).upper()
+    return ('DEBIT NOTE' in s or 'DEBIT MEMO' in s) and ('TAX' in s or 'GST' in s or 'IGST' in s or 'CGST' in s)
+
+def is_credit_note_with_tax(doc_type):
+    if pd.isna(doc_type):
+        return False
+    s = str(doc_type).upper()
+    return ('CREDIT NOTE' in s or 'CREDIT MEMO' in s) and ('TAX' in s or 'GST' in s or 'IGST' in s or 'CGST' in s)
+
+def get_doc_sub_type(doc_type):
+    """
+    Returns one of: 'credit_note_with_tax', 'credit_note', 'debit_note_with_tax',
+                    'debit_note', 'tax_invoice', 'other'
+    Used to route unmatched entries into separate ledger annexures.
+    """
+    if pd.isna(doc_type):
+        return 'other'
+    s = str(doc_type).upper()
+    if is_credit_note_with_tax(s):
+        return 'credit_note_with_tax'
+    if is_debit_note_with_tax(s):
+        return 'debit_note_with_tax'
+    if is_credit_note(s):
+        return 'credit_note'
+    if is_debit_note(s):
+        return 'debit_note'
+    return 'tax_invoice'
+
 def is_reversal_type(doc_type):
     """
     Detect ONLY Complete Reversal entries.
@@ -696,10 +727,15 @@ def run_reconciliation(vl_orig, cl_orig, tolerance=1.0):
         return None, ''
     results = {
         'invoice_matched': [],
-        'invoice_unmatched_vl': [],      # Tax Invoice / Sales Invoice only (pure invoices)
-        'invoice_unmatched_cl': [],
-        'cn_unmatched_vl': [],           # Credit Notes unmatched (Saleable Return, Non-Saleable, Credit Note etc.)
-        'dn_unmatched_vl_cn': [],        # VL Credit Notes that did NOT match any CL entry (separate annexure)
+        'invoice_unmatched_vl': [],      # Pure Tax Invoice / Sales Invoice only
+        'invoice_unmatched_cl': [],      # Pure Tax Invoice / Sales Invoice only
+        'cn_with_tax_unmatched_vl': [],  # Credit Note with Tax — VL
+        'cn_with_tax_unmatched_cl': [],  # Credit Note with Tax — CL
+        'cn_unmatched_vl': [],           # Credit Note (no tax) — VL
+        'cn_unmatched_cl': [],           # Credit Note (no tax) — CL
+        'dn_with_tax_unmatched_vl': [],  # Debit Note with Tax — VL
+        'dn_with_tax_unmatched_cl': [],  # Debit Note with Tax — CL
+        'dn_unmatched_vl_cn': [],        # VL Credit Notes unmatched (separate annexure)
         'dn_matched': [],
         'dn_unmatched_vl': [],
         'dn_unmatched_cl': [],
@@ -1071,6 +1107,80 @@ def run_reconciliation(vl_orig, cl_orig, tolerance=1.0):
             })
 
     # ════════════════════════════════════════════════════
+    # STEP 2C: Match Customer (CL) Debit Notes against
+    #          Vendor (VL) Credit Notes
+    # Many CL Debit Notes are the counterpart of VL Credit Notes.
+    # Matching order:
+    #   1st — Document Number (exact)
+    #   2nd — Period + Amount (within tolerance)
+    # ════════════════════════════════════════════════════
+    cl_dn_for_cn = cl[
+        (~cl['_matched']) &
+        (cl['doc_type'].apply(is_debit_note))
+    ].copy()
+
+    vl_cn_remaining = vl[
+        (~vl['_matched']) &
+        (vl['doc_type'].apply(is_credit_note))
+    ].copy()
+
+    for cl_idx, cl_row in cl_dn_for_cn.iterrows():
+        matched_2c = False
+        basis_2c = ''
+        vrow_2c = None
+
+        # 1st: Document Number match
+        doc_m = vl_cn_remaining[
+            (vl_cn_remaining['doc_no_clean'] == cl_row['doc_no_clean']) &
+            (~vl_cn_remaining['_matched'])
+        ]
+        if not doc_m.empty:
+            vrow_2c = doc_m.iloc[0]
+            matched_2c = True
+            basis_2c = 'Document Number (CL Debit Note ↔ VL Credit Note)'
+
+        # 2nd: Period + Amount
+        if not matched_2c:
+            cl_amt = round_amount(cl_row.get('debit', 0) + cl_row.get('credit', 0))
+            if cl_amt > 0:
+                amt_m = vl_cn_remaining[
+                    (~vl_cn_remaining['_matched']) &
+                    (vl_cn_remaining['period'] == cl_row.get('period', '')) &
+                    (abs(vl_cn_remaining['debit'] + vl_cn_remaining['credit'] - cl_amt) <= tolerance)
+                ]
+                if not amt_m.empty:
+                    vrow_2c = amt_m.iloc[0]
+                    matched_2c = True
+                    basis_2c = 'Period + Amount (CL Debit Note ↔ VL Credit Note)'
+
+        if matched_2c and vrow_2c is not None:
+            v_idx = vrow_2c['_idx']
+            vl.at[v_idx, '_matched'] = True
+            vl.at[v_idx, '_remark'] = f'Matched — Credit Note ↔ Customer Debit Note ({basis_2c.split("(")[0].strip()})'
+            vl.at[v_idx, '_match_ref'] = str(cl_row.get('doc_no', ''))
+            cl.at[cl_idx, '_matched'] = True
+            cl.at[cl_idx, '_remark'] = f'Matched — Debit Note ↔ Vendor Credit Note ({basis_2c.split("(")[0].strip()})'
+            cl.at[cl_idx, '_match_ref'] = str(vrow_2c.get('doc_no', ''))
+            cl_dn_for_cn.at[cl_idx, '_matched'] = True
+            vl_cn_remaining.at[vrow_2c.name, '_matched'] = True
+            results['dn_matched'].append({
+                'VL Doc No': vrow_2c.get('doc_no', ''),
+                'VL Date': vrow_2c.get('doc_date', ''),
+                'VL Type': vrow_2c.get('doc_type', ''),
+                'VL Debit': vrow_2c.get('debit', 0),
+                'VL Credit': vrow_2c.get('credit', 0),
+                'CL Doc No': cl_row.get('doc_no', ''),
+                'CL Ref No': cl_row.get('doc_ref_no', ''),
+                'CL Date': cl_row.get('doc_date', ''),
+                'CL Type': cl_row.get('doc_type', ''),
+                'CL Debit': cl_row.get('debit', 0),
+                'CL Credit': cl_row.get('credit', 0),
+                'Match Basis': basis_2c,
+                'Match Type': 'Credit Note ↔ Customer Debit Note',
+                'Remark': f'Matched — VL Credit Note vs CL Debit Note ({basis_2c.split("(")[0].strip()})',
+            })
+
+    # ════════════════════════════════════════════════════
     # STEP 3: Match Debit Notes
     # ════════════════════════════════════════════════════
     vl_dn = vl[(~vl['_matched']) & (vl['doc_type'].apply(is_debit_note))].copy()
@@ -1133,11 +1243,28 @@ def run_reconciliation(vl_orig, cl_orig, tolerance=1.0):
         matched = False
         basis = ''
         if vrow['utr']:
-            utr_matches = cl_col[(cl_col['utr'] == vrow['utr']) & (cl_col['utr'] != '') & (~cl_col['_matched'])]
+            # Match by UTR + same month (trust-to-collection: same month ensures correct period)
+            utr_matches = cl_col[
+                (cl_col['utr'] == vrow['utr']) &
+                (cl_col['utr'] != '') &
+                (cl_col['period'] == vrow['period']) &
+                (~cl_col['_matched'])
+            ]
             if not utr_matches.empty:
                 crow = utr_matches.iloc[0]
                 matched = True
-                basis = 'UTR Number'
+                basis = 'UTR Number + Same Month'
+            else:
+                # Fallback: UTR match across any month (UTR is globally unique)
+                utr_matches_any = cl_col[
+                    (cl_col['utr'] == vrow['utr']) &
+                    (cl_col['utr'] != '') &
+                    (~cl_col['_matched'])
+                ]
+                if not utr_matches_any.empty:
+                    crow = utr_matches_any.iloc[0]
+                    matched = True
+                    basis = f'UTR Number (Cross-Month: VL {vrow["period"]} → CL {utr_matches_any.iloc[0]["period"]})'
 
         if not matched:
             vamt = round_amount(vrow['debit'] + vrow['credit'])
@@ -1181,12 +1308,15 @@ def run_reconciliation(vl_orig, cl_orig, tolerance=1.0):
     # ════════════════════════════════════════════════════
     for idx, r in vl[~vl['_matched']].iterrows():
         doc_t = str(r.get('doc_type', ''))
+        sub_type = get_doc_sub_type(doc_t)
         if is_credit_note(doc_t):
             unmatched_remark = 'Unmatched — Credit Note'
         elif is_reversal_type(doc_t):
             unmatched_remark = 'Unmatched — Reversal Entry'
+        elif is_debit_note(doc_t):
+            unmatched_remark = 'Unmatched — Debit Note'
         else:
-            unmatched_remark = 'Unmatched — Invoice'
+            unmatched_remark = 'Unmatched — Tax Invoice'
         vl.at[idx, '_remark'] = unmatched_remark
         entry = {
             'Doc No': r.get('doc_no', ''),
@@ -1198,41 +1328,67 @@ def run_reconciliation(vl_orig, cl_orig, tolerance=1.0):
             'Source': 'Vendor Ledger',
             'Remark': unmatched_remark,
         }
-        if is_debit_note(r.get('doc_type', '')):
-            results['dn_unmatched_vl'].append(entry)
-        elif is_collection(r.get('doc_type', '')):
+        if is_debit_note(doc_t):
+            if sub_type == 'debit_note_with_tax':
+                results['dn_with_tax_unmatched_vl'].append(entry)
+            else:
+                results['dn_unmatched_vl'].append(entry)
+        elif is_collection(doc_t):
             results['collection_unmatched_vl'].append(entry)
-        elif is_credit_note(r.get('doc_type', '')):
-            # Credit Notes (Saleable Return, Non-Saleable, Credit Note, etc.)
-            # → go to both cn_unmatched_vl (for recon statement) AND dn_unmatched_vl_cn (for separate annexure)
-            results['cn_unmatched_vl'].append(entry)
-            results['dn_unmatched_vl_cn'].append(entry)
+        elif is_credit_note(doc_t):
+            if sub_type == 'credit_note_with_tax':
+                results['cn_with_tax_unmatched_vl'].append(entry)
+                results['dn_unmatched_vl_cn'].append(entry)
+            else:
+                results['cn_unmatched_vl'].append(entry)
+                results['dn_unmatched_vl_cn'].append(entry)
         else:
             # Only pure tax invoices / sales invoices
             results['invoice_unmatched_vl'].append(entry)
 
     for idx, r in cl[~cl['_matched']].iterrows():
         doc_t = str(r.get('doc_type', ''))
+        sub_type = get_doc_sub_type(doc_t)
         if is_credit_note(doc_t):
             cl_unmatched_remark = 'Unmatched — Credit Note'
+        elif is_debit_note(doc_t):
+            cl_unmatched_remark = 'Unmatched — Debit Note'
         else:
-            cl_unmatched_remark = 'Unmatched — Invoice'
+            cl_unmatched_remark = 'Unmatched — Tax Invoice'
         cl.at[idx, '_remark'] = cl_unmatched_remark
+        # Always include Date and Ref No clearly in every CL entry
+        raw_date = r.get('doc_date', '')
+        try:
+            dt_parsed = pd.to_datetime(raw_date, errors='coerce')
+            fmt_date = dt_parsed.strftime('%d-%b-%Y') if pd.notna(dt_parsed) else ''
+        except Exception:
+            fmt_date = str(raw_date)
+        ref_no_val = str(r.get('doc_ref_no', '') or '')
+        ref_no_val = '' if ref_no_val in ('nan', 'None', 'NaN') else ref_no_val
         entry = {
-            'Doc No': r.get('doc_no', ''),
-            'Ref No': r.get('doc_ref_no', ''),
-            'Date': r.get('doc_date', ''),
-            'Type': r.get('doc_type', ''),
+            'Voucher No': r.get('doc_no', ''),
+            'Voucher Ref No': ref_no_val,          # always present, clearly labeled
+            'Date': fmt_date,                       # always present, formatted DD-Mon-YYYY
+            'Doc Type': r.get('doc_type', ''),
             'Debit': r.get('debit', 0),
             'Credit': r.get('credit', 0),
             'Source': 'Customer Ledger',
             'Remark': cl_unmatched_remark,
         }
-        if is_debit_note(r.get('doc_type', '')):
-            results['dn_unmatched_cl'].append(entry)
-        elif is_collection(r.get('doc_type', '')):
+        if is_debit_note(doc_t):
+            if sub_type == 'debit_note_with_tax':
+                results['dn_with_tax_unmatched_cl'].append(entry)
+            else:
+                results['dn_unmatched_cl'].append(entry)
+        elif is_collection(doc_t):
             results['collection_unmatched_cl'].append(entry)
+        elif is_credit_note(doc_t):
+            if sub_type == 'credit_note_with_tax':
+                results['cn_with_tax_unmatched_cl'].append(entry)
+            else:
+                results['cn_unmatched_cl'].append(entry)
         else:
+            # Pure tax invoices / sales invoices only
             results['invoice_unmatched_cl'].append(entry)
 
     results['vl_annotated'] = vl
@@ -1678,22 +1834,29 @@ def build_excel(results, vl_orig, cl_orig, VL='Vendor', CL='Customer'):
         auto_width(ws)
 
     vl6 = VL[:10]; cl6 = CL[:10]
-    write_sheet(f'Inv-Matched',                   results['invoice_matched'],         '1A6B45')
-    write_sheet(f'Inv-Unmatch-{vl6}',             results['invoice_unmatched_vl'],    'A32035', is_vl_sheet=True)
-    write_sheet(f'Inv-Unmatch-{cl6}',             results['invoice_unmatched_cl'],    'A32035', is_vl_sheet=False)
-    write_sheet(f'CN-Unmatch-{vl6}',              results['dn_unmatched_vl_cn'],      'B85C00', is_vl_sheet=True)
-    write_sheet(f'DN-CN-Matched',                 results['dn_matched'],              '1A6B45')
-    write_sheet(f'DN-Unmatch-{vl6}',              results['dn_unmatched_vl'],         'A32035', is_vl_sheet=True)
-    write_sheet(f'DN-Unmatch-{cl6}',              results['dn_unmatched_cl'],         'A32035', is_vl_sheet=False)
-    write_sheet(f'Coll-Matched',                  results['collection_matched'],      '1A6B45')
-    write_sheet(f'Coll-Unmatch-{vl6}',            results['collection_unmatched_vl'], 'A32035', is_vl_sheet=True)
-    write_sheet(f'Coll-Unmatch-{cl6}',            results['collection_unmatched_cl'], 'A32035', is_vl_sheet=False)
-    write_sheet(f'AnnexA-CrossLedger',            results['reversal_cross_ledger'],   'B85C00')
-    write_sheet(f'AnnexB-{vl6}-Internal',         results['reversal_vl_internal'],    '7B5EA7')
+    write_sheet(f'Inv-Matched',                   results['invoice_matched'],                    '1A6B45')
+    write_sheet(f'Inv-Unmatch-{vl6}',             results['invoice_unmatched_vl'],               'A32035', is_vl_sheet=True)
+    write_sheet(f'Inv-Unmatch-{cl6}',             results['invoice_unmatched_cl'],               'A32035', is_vl_sheet=False)
+    # ── Separate ledgers for Credit Note / CN with Tax / Debit Note / DN with Tax ──
+    write_sheet(f'CrNote-Unmatch-{vl6}',          results['cn_unmatched_vl'],                    'B85C00', is_vl_sheet=True)
+    write_sheet(f'CrNote-Unmatch-{cl6}',          results['cn_unmatched_cl'],                    'B85C00', is_vl_sheet=False)
+    write_sheet(f'CrNoteWTax-Unmatch-{vl6}',      results['cn_with_tax_unmatched_vl'],           '7B5EA7', is_vl_sheet=True)
+    write_sheet(f'CrNoteWTax-Unmatch-{cl6}',      results['cn_with_tax_unmatched_cl'],           '7B5EA7', is_vl_sheet=False)
+    write_sheet(f'DrNote-Unmatch-{vl6}',          results['dn_unmatched_vl'],                    'A32035', is_vl_sheet=True)
+    write_sheet(f'DrNote-Unmatch-{cl6}',          results['dn_unmatched_cl'],                    'A32035', is_vl_sheet=False)
+    write_sheet(f'DrNoteWTax-Unmatch-{vl6}',      results['dn_with_tax_unmatched_vl'],           '7B5EA7', is_vl_sheet=True)
+    write_sheet(f'DrNoteWTax-Unmatch-{cl6}',      results['dn_with_tax_unmatched_cl'],           '7B5EA7', is_vl_sheet=False)
+    write_sheet(f'CN-UnmatchAll-{vl6}',           results['dn_unmatched_vl_cn'],                 'B85C00', is_vl_sheet=True)
+    write_sheet(f'DN-CN-Matched',                 results['dn_matched'],                         '1A6B45')
+    write_sheet(f'Coll-Matched',                  results['collection_matched'],                  '1A6B45')
+    write_sheet(f'Coll-Unmatch-{vl6}',            results['collection_unmatched_vl'],             'A32035', is_vl_sheet=True)
+    write_sheet(f'Coll-Unmatch-{cl6}',            results['collection_unmatched_cl'],             'A32035', is_vl_sheet=False)
+    write_sheet(f'AnnexA-CrossLedger',            results['reversal_cross_ledger'],               'B85C00')
+    write_sheet(f'AnnexB-{vl6}-Internal',         results['reversal_vl_internal'],                '7B5EA7')
     rev_mis  = [r for r in results['reversal_unmatched'] if r.get('Reason','') == 'Amount Mismatch']
     rev_miss = [r for r in results['reversal_unmatched'] if r.get('Reason','') != 'Amount Mismatch']
-    write_sheet(f'AnnexC1-AmtMismatch',           rev_mis,                            'A32035')
-    write_sheet(f'AnnexC2-MissingOrig',           rev_miss,                           'A32035')
+    write_sheet(f'AnnexC1-AmtMismatch',           rev_mis,                                        'A32035')
+    write_sheet(f'AnnexC2-MissingOrig',           rev_miss,                                       'A32035')
 
     # ══════════════════════════════════════════
     # RECON STATEMENT SHEET
@@ -2502,6 +2665,8 @@ def main():
     tabs = st.tabs([
         f"🧾 Invoices",
         f"📝 DN / Credit Notes",
+        f"🗂️ Credit Note Ledger",
+        f"🗂️ Debit Note Ledger",
         f"💰 Collections",
         f"🔁 Reversals",
         f"⚠️ All Unmatched",
@@ -2518,7 +2683,7 @@ def main():
         with c1:
             vl_inv_cnt = len(results['invoice_unmatched_vl'])
             st.markdown(f'<span class="section-tag tag-vl">UNMATCHED TAX INVOICES — {VL} ({vl_inv_cnt} items)</span>', unsafe_allow_html=True)
-            st.caption("Pure tax invoices / sales invoices only. Credit Notes and Debit Notes are in the DN/CN tab.")
+            st.caption("Pure tax invoices / sales invoices only. Credit Notes and Debit Notes are in their own tabs.")
             display_df(results['invoice_unmatched_vl'])
         with c2:
             cl_inv_cnt = len(results['invoice_unmatched_cl'])
@@ -2534,21 +2699,65 @@ def main():
         display_df(dn_only_matched)
         st.markdown("---")
         cn_un_vl_cnt = len(results['dn_unmatched_vl_cn'])
-        st.markdown(f'<span class="section-tag tag-partial">🟠 UNMATCHED CREDIT NOTES — {VL} ({cn_un_vl_cnt} items)</span>', unsafe_allow_html=True)
-        st.caption(f"Credit Notes / Saleable Returns / Non-Saleable Returns in {VL} with no matching entry in {CL}.")
+        st.markdown(f'<span class="section-tag tag-partial">🟠 ALL UNMATCHED CREDIT NOTES (ALL TYPES) — {VL} ({cn_un_vl_cnt} items)</span>', unsafe_allow_html=True)
+        st.caption(f"All Credit Note types from {VL} with no matching entry in {CL}. See 'Credit Note Ledger' tab for breakdown by type.")
         display_df(results['dn_unmatched_vl_cn'])
-        st.markdown("---")
-        c1, c2 = st.columns(2)
-        with c1:
-            dn_un_vl_cnt = len(results['dn_unmatched_vl'])
-            st.markdown(f'<span class="section-tag tag-vl">UNMATCHED DEBIT NOTES — {VL} ({dn_un_vl_cnt} items)</span>', unsafe_allow_html=True)
-            display_df(results['dn_unmatched_vl'])
-        with c2:
-            dn_un_cl_cnt2 = len(results['dn_unmatched_cl'])
-            st.markdown(f'<span class="section-tag tag-cl">UNMATCHED DEBIT NOTES — {CL} ({dn_un_cl_cnt2} items)</span>', unsafe_allow_html=True)
-            display_df(results['dn_unmatched_cl'])
 
     with tabs[2]:
+        st.markdown('<a name="cn_ledger"></a>', unsafe_allow_html=True)
+        st.markdown(f'### 🗂️ Credit Note Ledger — Separate by Type')
+        st.caption("Credit Notes separated into sub-types. Excluded from Tax Invoice annexure.")
+        st.markdown("---")
+        # Credit Note (plain)
+        c1, c2 = st.columns(2)
+        with c1:
+            cnt = len(results['cn_unmatched_vl'])
+            st.markdown(f'<span class="section-tag tag-vl">CREDIT NOTE — {VL} ({cnt} items)</span>', unsafe_allow_html=True)
+            display_df(results['cn_unmatched_vl'])
+        with c2:
+            cnt = len(results['cn_unmatched_cl'])
+            st.markdown(f'<span class="section-tag tag-cl">CREDIT NOTE — {CL} ({cnt} items)</span>', unsafe_allow_html=True)
+            display_df(results['cn_unmatched_cl'])
+        st.markdown("---")
+        # Credit Note with Tax
+        c1, c2 = st.columns(2)
+        with c1:
+            cnt = len(results['cn_with_tax_unmatched_vl'])
+            st.markdown(f'<span class="section-tag tag-vl">CREDIT NOTE WITH TAX — {VL} ({cnt} items)</span>', unsafe_allow_html=True)
+            display_df(results['cn_with_tax_unmatched_vl'])
+        with c2:
+            cnt = len(results['cn_with_tax_unmatched_cl'])
+            st.markdown(f'<span class="section-tag tag-cl">CREDIT NOTE WITH TAX — {CL} ({cnt} items)</span>', unsafe_allow_html=True)
+            display_df(results['cn_with_tax_unmatched_cl'])
+
+    with tabs[3]:
+        st.markdown('<a name="dn_ledger"></a>', unsafe_allow_html=True)
+        st.markdown(f'### 🗂️ Debit Note Ledger — Separate by Type')
+        st.caption("Debit Notes separated into sub-types. Excluded from Tax Invoice annexure.")
+        st.markdown("---")
+        # Debit Note (plain)
+        c1, c2 = st.columns(2)
+        with c1:
+            cnt = len(results['dn_unmatched_vl'])
+            st.markdown(f'<span class="section-tag tag-vl">DEBIT NOTE — {VL} ({cnt} items)</span>', unsafe_allow_html=True)
+            display_df(results['dn_unmatched_vl'])
+        with c2:
+            cnt = len(results['dn_unmatched_cl'])
+            st.markdown(f'<span class="section-tag tag-cl">DEBIT NOTE — {CL} ({cnt} items)</span>', unsafe_allow_html=True)
+            display_df(results['dn_unmatched_cl'])
+        st.markdown("---")
+        # Debit Note with Tax
+        c1, c2 = st.columns(2)
+        with c1:
+            cnt = len(results['dn_with_tax_unmatched_vl'])
+            st.markdown(f'<span class="section-tag tag-vl">DEBIT NOTE WITH TAX — {VL} ({cnt} items)</span>', unsafe_allow_html=True)
+            display_df(results['dn_with_tax_unmatched_vl'])
+        with c2:
+            cnt = len(results['dn_with_tax_unmatched_cl'])
+            st.markdown(f'<span class="section-tag tag-cl">DEBIT NOTE WITH TAX — {CL} ({cnt} items)</span>', unsafe_allow_html=True)
+            display_df(results['dn_with_tax_unmatched_cl'])
+
+    with tabs[4]:
         st.markdown('<a name="col"></a>', unsafe_allow_html=True)
         st.markdown(f'<span class="section-tag tag-matched">MATCHED COLLECTIONS</span>', unsafe_allow_html=True)
         display_df(results['collection_matched'])
@@ -2560,7 +2769,7 @@ def main():
             st.markdown(f'<span class="section-tag tag-cl">UNMATCHED COLLECTIONS — {CL}</span>', unsafe_allow_html=True)
             display_df(results['collection_unmatched_cl'])
 
-    with tabs[3]:
+    with tabs[5]:
         st.markdown('<a name="rev_cross"></a>', unsafe_allow_html=True)
         st.markdown(f'<span class="section-tag tag-partial">⚠️ ANNEXURE A — REVERSED IN {VL} | INVOICE ALSO IN {CL}</span>', unsafe_allow_html=True)
         st.caption(f"These invoices were reversed in {VL} but the original invoice also exists in {CL}. Needs review.")
@@ -2580,17 +2789,22 @@ def main():
         st.markdown(f'<span class="section-tag tag-unmatched">❌ ANNEXURE C2 — REVERSAL | ORIGINAL NOT FOUND ({len(rev_miss)} items)</span>', unsafe_allow_html=True)
         display_df(rev_miss)
 
-    with tabs[4]:
+    with tabs[6]:
         all_unmatched = []
-        for item in results['invoice_unmatched_vl'] + results['dn_unmatched_vl_cn'] + results['dn_unmatched_vl'] + results['collection_unmatched_vl']:
+        for item in (results['invoice_unmatched_vl'] + results['dn_unmatched_vl_cn'] +
+                     results['dn_unmatched_vl'] + results['dn_with_tax_unmatched_vl'] +
+                     results['cn_unmatched_vl'] + results['cn_with_tax_unmatched_vl'] +
+                     results['collection_unmatched_vl']):
             item = dict(item); item['Ledger'] = VL; all_unmatched.append(item)
-        for item in results['invoice_unmatched_cl'] + results['dn_unmatched_cl'] + results['collection_unmatched_cl']:
+        for item in (results['invoice_unmatched_cl'] + results['dn_unmatched_cl'] +
+                     results['dn_with_tax_unmatched_cl'] + results['cn_unmatched_cl'] +
+                     results['cn_with_tax_unmatched_cl'] + results['collection_unmatched_cl']):
             item = dict(item); item['Ledger'] = CL; all_unmatched.append(item)
         st.markdown(f'<span class="section-tag tag-unmatched">ALL UNMATCHED ITEMS — {VL} & {CL}</span>', unsafe_allow_html=True)
-        st.caption("Includes: Tax Invoices, Credit Notes (VL), Debit Notes, Collections — all unmatched entries.")
+        st.caption("Includes: Tax Invoices, Credit Notes, Credit Notes with Tax, Debit Notes, Debit Notes with Tax, Collections — all unmatched entries.")
         display_df(all_unmatched)
 
-    with tabs[5]:
+    with tabs[7]:
         st.markdown(f'<span class="section-tag tag-vl">📘 {VL} — VENDOR LEDGER WITH REMARKS</span>', unsafe_allow_html=True)
         st.caption(f"🟢 Green = Matched | 🔴 Red = Unmatched | 🟡 Yellow = Reversal")
         if not vl_ann_df.empty:
@@ -2602,7 +2816,7 @@ def main():
             if vl_closing_val:
                 st.info(f"**{VL} Closing Balance: {fmt_inr(vl_closing_val)}**")
 
-    with tabs[6]:
+    with tabs[8]:
         st.markdown(f'<span class="section-tag tag-cl">📗 {CL} — CUSTOMER LEDGER WITH REMARKS</span>', unsafe_allow_html=True)
         st.caption(f"🟢 Green = Matched | 🔴 Red = Unmatched")
         if not cl_ann_df.empty:
@@ -2610,7 +2824,7 @@ def main():
             for col in disp.columns:
                 if 'date' in col.lower():
                     disp[col] = pd.to_datetime(disp[col], errors='coerce').dt.strftime('%d-%b-%Y').fillna('')
-            # Rename for display clarity
+            # Rename for display clarity — always show Voucher No, Voucher Ref No, Date clearly
             rename_display = {'doc_no': 'Voucher No', 'doc_ref_no': 'Voucher Ref No',
                               'doc_type': 'Doc Type', 'doc_date': 'Date',
                               '_remark': 'Remark', '_match_ref': 'Matched With'}
@@ -2619,8 +2833,6 @@ def main():
             drop_cols = [c for c in disp.columns if c in ('doc_no_clean','doc_ref_no_clean','period','_idx','_matched')]
             disp = disp.drop(columns=drop_cols, errors='ignore')
             st.dataframe(disp, use_container_width=True, hide_index=True)
-            if cl_closing_val:
-                st.info(f"**{CL} Closing Balance: {fmt_inr(cl_closing_val)}**")
 
 
 if __name__ == "__main__":
