@@ -1735,6 +1735,9 @@ def main():
     VL = vname   # use actual names everywhere
     CL = cname
 
+    # Define tolerance early so it's available in instructions before sidebar renders
+    tolerance = st.session_state.get('tolerance_val', 1.0)
+
     # ── How to Use Instructions ──
     with st.expander("📖 How to Reconcile — Full Instructions", expanded=False):
         st.markdown(f"""
@@ -1788,6 +1791,7 @@ def main():
             min_value=0.0, max_value=100.0, value=1.0, step=0.5,
             help="Max difference allowed when matching by amount"
         )
+        st.session_state['tolerance_val'] = tolerance
         st.markdown("---")
         st.markdown("### 📋 5-Step Matching Logic")
         st.markdown(f"""
