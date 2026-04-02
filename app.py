@@ -571,14 +571,12 @@ def _load_any_ledger(file, is_vendor=True):
 
 def load_vendor_ledger(file):
     df, closing = _load_any_ledger(file, is_vendor=True)
-    df._vl_closing = closing
-    return df
+    return df, closing
 
 
 def load_customer_ledger(file):
     df, closing = _load_any_ledger(file, is_vendor=False)
-    df._cl_closing = closing
-    return df
+    return df, closing
 
 # ─────────────────────────────────────────────
 # RECONCILIATION ENGINE
@@ -1737,6 +1735,50 @@ def main():
     VL = vname   # use actual names everywhere
     CL = cname
 
+    # ── How to Use Instructions ──
+    with st.expander("📖 How to Reconcile — Full Instructions", expanded=False):
+        st.markdown(f"""
+        <div class="info-box" style="line-height:1.9;">
+        <b style="font-size:1rem;color:#4f8eff;">Step-by-Step Reconciliation Guide</b><br><br>
+
+        <b>1. Enter Names</b><br>
+        Type the Vendor name (your supplier's name as appearing in their books) and Customer name (your company name as in your books). These names will appear on all reports and Excel sheets.<br><br>
+
+        <b>2. Prepare Your Ledger Files</b><br>
+        Export both ledgers as <b>.xlsx</b> from your ERP (Tally, SAP, Oracle, Zoho, QuickBooks, etc.).<br>
+        &nbsp;&nbsp;• <b>Vendor Ledger (VL):</b> The ledger your vendor has shared — shows how they have recorded transactions with you. Must have: Date, Doc No, Doc Type, Debit, Credit, Closing Balance.<br>
+        &nbsp;&nbsp;• <b>Customer Ledger (CL):</b> Your own ledger — shows the same party's account in your books. Must have: Date, Doc No, Doc Type, Debit, Credit, Closing Balance.<br>
+        &nbsp;&nbsp;• The app auto-detects column headers. If columns are not detected, use the <b>Column Mapping</b> section below to assign them manually.<br>
+        &nbsp;&nbsp;• The <b>Closing Balance</b> is read from the last row of the Closing/Balance column automatically.<br><br>
+
+        <b>3. Understand What Gets Matched</b><br>
+        &nbsp;&nbsp;• <b>Tax Invoices / Sales Invoices</b> → Matched by exact Document Number between VL and CL.<br>
+        &nbsp;&nbsp;• <b>Credit Notes, Saleable Returns, Non-Saleable Returns</b> (in VL) → Matched against Discount Debit Notes and PRN entries in CL.<br>
+        &nbsp;&nbsp;• <b>Debit Notes</b> → Matched by Document Number, then by Period + Amount (within ₹{tolerance} tolerance).<br>
+        &nbsp;&nbsp;• <b>Collections / Payments</b> → Matched by UTR number extracted from Particulars/Doc No, then by Period + Amount.<br>
+        &nbsp;&nbsp;• <b>Complete Reversals</b> in VL → The original invoice is traced using the Particulars column. Three outcomes: (A) original also in CL (needs review), (B) purely internal VL reversal, (C) original not found or amount mismatch.<br><br>
+
+        <b>4. What the Reconciliation Statement Shows</b><br>
+        The statement starts from the <b>VL Closing Balance</b>, then adjusts for all differences to arrive at a Net Balance (B). This is then compared against the <b>CL Closing Balance</b> (C). The difference (B–C) should be zero once all items are investigated and resolved.<br>
+        &nbsp;&nbsp;• <b>Less: Invoices in VL not in CL</b> — Invoices your vendor shows but you haven't recorded yet.<br>
+        &nbsp;&nbsp;• <b>Add: Credit Notes in VL not in CL</b> — Returns/credits your vendor shows but not yet in your books.<br>
+        &nbsp;&nbsp;• <b>Less: Debit Notes in CL not in VL</b> — Deductions you've recorded (discounts/claims) not yet acknowledged by vendor.<br>
+        &nbsp;&nbsp;• <b>Add: Invoices in CL not in VL</b> — Invoices in your books the vendor hasn't reflected yet.<br>
+        &nbsp;&nbsp;• <b>Add/Less: Payments</b> — Payments recorded in one ledger but not yet the other.<br><br>
+
+        <b>5. Download the Report</b><br>
+        Click the green <b>⬇️ Download Report</b> button to get the full Excel workbook with 18 sheets — Summary, Recon Statement, both ledgers with colour-coded remarks, and 14 annexure sheets covering every matched/unmatched category in detail.<br><br>
+
+        <b>6. Action Checklist After Reconciliation</b><br>
+        &nbsp;&nbsp;✅ Matched items → No action needed.<br>
+        &nbsp;&nbsp;🔴 Unmatched Invoices → Check if invoice was raised/received; book it if missing.<br>
+        &nbsp;&nbsp;🟡 Credit Notes in VL not in CL → Raise a corresponding debit note or book the credit note in your books.<br>
+        &nbsp;&nbsp;⚠️ Reversal Annexure A → Invoice reversed by vendor but still open in your books — investigate and reverse or close.<br>
+        &nbsp;&nbsp;❌ Reversal Annexure C → Amount mismatch or missing original — get vendor clarification.<br>
+        &nbsp;&nbsp;💰 Unmatched Collections → Confirm UTR with bank; match manually if needed.
+        </div>
+        """, unsafe_allow_html=True)
+
     # Sidebar
     with st.sidebar:
         st.markdown(f"### ⚙️ Configuration")
@@ -1747,24 +1789,33 @@ def main():
             help="Max difference allowed when matching by amount"
         )
         st.markdown("---")
-        st.markdown("### 📋 Matching Rules")
+        st.markdown("### 📋 5-Step Matching Logic")
         st.markdown(f"""
         <div class="info-box">
-        1. Invoices → Doc Number<br>
-        2. Reversals → Complete Reversal / Saleable Return<br>
-        3. Credit Notes ({VL}) → Discount DN / PRN ({CL})<br>
-        4. Debit Notes → Doc No → Period+Amount<br>
-        5. Collections → UTR → Period+Amount<br>
-        6. Remaining → Unmatched
+        <b>Step 1 — Complete Reversals</b><br>
+        Finds VL rows with type "Complete Reversal". Looks up the original invoice from Particulars. Three sub-cases:<br>
+        &nbsp;&nbsp;A: Reversed in VL <i>and</i> present in CL → ⚠️ Needs Review<br>
+        &nbsp;&nbsp;B: Reversed in VL, NOT in CL → ✅ Internal only<br>
+        &nbsp;&nbsp;C: No original found / amount mismatch → ❌ Unmatched<br><br>
+        <b>Step 2 — Invoice Matching</b><br>
+        Matches VL Tax Invoices vs CL Invoices by exact Document Number. Excludes Credit Notes, DN, Collections.<br><br>
+        <b>Step 2B — Credit Notes vs Discount DN/PRN</b><br>
+        VL Credit Notes (incl. Saleable Return, Non-Saleable) matched against CL Discount Debit Notes and PRN entries. First by Doc No, then by Period+Amount.<br><br>
+        <b>Step 3 — Debit Note Matching</b><br>
+        Matches by Doc Number first, then Period+Amount (within ₹{tolerance} tolerance).<br><br>
+        <b>Step 4 — Collection Matching</b><br>
+        Extracts UTR from Particulars/Doc No. Matches by UTR first, then Period+Amount.<br><br>
+        <b>Step 5 — Unmatched</b><br>
+        Remaining rows go to separate unmatched buckets for Invoices, Credit Notes, Debit Notes, and Collections.
         </div>
         """, unsafe_allow_html=True)
         st.markdown("---")
         st.markdown(f"""
         <div class="info-box" style="font-size:0.72rem;">
         <b>Color Code:</b><br>
-        <span style="color:var(--vl-color)">■ {VL}</span> (Blue)<br>
-        <span style="color:var(--cl-color)">■ {CL}</span> (Teal)<br>
-        <span style="color:#00d4aa">■ Matched</span> · <span style="color:#ff4d6d">■ Unmatched</span>
+        <span style="color:#4f8eff">■ {VL}</span> (Blue)<br>
+        <span style="color:#00d4aa">■ {CL}</span> (Teal)<br>
+        <span style="color:#00d4aa">■ Matched</span> · <span style="color:#ff4d6d">■ Unmatched</span> · <span style="color:#ff8c42">■ Reversal</span>
         </div>
         """, unsafe_allow_html=True)
 
@@ -1900,7 +1951,9 @@ def main():
     if st.session_state.get('vl_file_id') != vl_file_id or 'vl_parsed' not in st.session_state:
         with st.spinner(f"Parsing {VL} ledger..."):
             try:
-                st.session_state['vl_parsed'] = load_vendor_ledger(vl_file)
+                vl_df, vl_close = load_vendor_ledger(vl_file)
+                st.session_state['vl_parsed'] = vl_df
+                st.session_state['vl_closing_val'] = vl_close
                 st.session_state['vl_file_id'] = vl_file_id
                 st.session_state.pop('results', None)
                 st.session_state.pop('excel_data', None)
@@ -1911,7 +1964,9 @@ def main():
     if st.session_state.get('cl_file_id') != cl_file_id or 'cl_parsed' not in st.session_state:
         with st.spinner(f"Parsing {CL} ledger..."):
             try:
-                st.session_state['cl_parsed'] = load_customer_ledger(cl_file)
+                cl_df, cl_close = load_customer_ledger(cl_file)
+                st.session_state['cl_parsed'] = cl_df
+                st.session_state['cl_closing_val'] = cl_close
                 st.session_state['cl_file_id'] = cl_file_id
                 st.session_state.pop('results', None)
                 st.session_state.pop('excel_data', None)
@@ -1922,14 +1977,13 @@ def main():
     vl = st.session_state['vl_parsed']
     cl = st.session_state['cl_parsed']
 
-    # Closing balances — read from raw file before row filtering (captured during load)
-    # Both use the same logic: last non-null value from closing/balance column
-    vl_closing = getattr(vl, '_vl_closing', None)
+    # Closing balances — stored separately in session_state (DataFrame attributes don't persist)
+    vl_closing = st.session_state.get('vl_closing_val')
     if vl_closing is None:
-        # Fallback: try from the filtered df closing column
+        # Fallback: try from the filtered df closing column (last non-null value)
         vl_closing = vl['closing'].dropna().iloc[-1] if 'closing' in vl.columns and not vl['closing'].dropna().empty else None
 
-    cl_closing = getattr(cl, '_cl_closing', None)
+    cl_closing = st.session_state.get('cl_closing_val')
     if cl_closing is None:
         cl_closing = cl['closing'].dropna().iloc[-1] if 'closing' in cl.columns and not cl['closing'].dropna().empty else None
 
@@ -2231,17 +2285,17 @@ def main():
     # ── LEDGER RECONCILIATION STATEMENT (sample format from image) ──
     st.markdown("---")
     st.markdown("### 📋 Ledger Reconciliation Statement")
-    vl_bal     = float(vl_closing_val) if vl_closing_val else 0.0
+    vl_bal     = float(vl_closing_val) if vl_closing_val is not None else 0.0
     cl_bal_act = float(cl_closing_val) if cl_closing_val is not None else 0.0
     adj_inv_vl = inv_un_vl_val
-    adj_cn_vl  = cn_matched_val
+    # Credit notes in VL not matched to CL (these reduce VL balance from CL perspective)
+    adj_cn_vl  = safe_sum(results.get('cn_unmatched_vl', []), 'Debit') + safe_sum(results.get('cn_unmatched_vl', []), 'Credit')
     adj_dn_cl  = dn_un_cl_val
     adj_inv_cl = inv_un_cl_val
     adj_pay_vl = col_un_vl_val
     adj_pay_cl = col_un_cl_val
     net_bal_b  = vl_bal - adj_inv_vl + adj_cn_vl - adj_dn_cl + adj_inv_cl + adj_pay_vl - adj_pay_cl
-    # Use actual CL closing if available, else approximate
-    cl_balance = cl_bal_act  # Credit (Cr) - Debit (Dr) from customer ledger
+    cl_balance = cl_bal_act
     diff_bc    = net_bal_b - cl_balance
 
     recon_rows = [
