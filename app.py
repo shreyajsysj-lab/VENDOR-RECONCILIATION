@@ -343,6 +343,25 @@ def extract_ref_from_particulars(particulars):
     s = re.sub(r'[\s\-_/]', '', s)
     return s.strip()
 
+
+def extract_all_refs_from_particulars(particulars):
+    """
+    Extract ALL candidate reference/doc numbers from a particulars string.
+    Returns a list of cleaned candidate strings (4+ alphanumeric chars).
+    Used for matching VL Credit Notes against CL entries via particulars text.
+    """
+    if pd.isna(particulars):
+        return []
+    s = str(particulars).strip().upper()
+    # Extract all alphanumeric tokens of 4+ characters (typical doc no patterns)
+    tokens = re.findall(r'[A-Z0-9]{4,}', s)
+    # Also try the full string stripped of separators
+    full_clean = re.sub(r'[\s\-_/]', '', s)
+    candidates = list(dict.fromkeys(tokens))  # deduplicate, preserve order
+    if full_clean and full_clean not in candidates:
+        candidates.append(full_clean)
+    return candidates
+
 # ─────────────────────────────────────────────
 # LOAD & PARSE
 # ─────────────────────────────────────────────
@@ -643,6 +662,38 @@ def run_reconciliation(vl_orig, cl_orig, tolerance=1.0):
             mask_ref = (cl_df['doc_ref_no_clean'] == key) & (cl_df['doc_ref_no_clean'] != '')
             return cl_df[mask_primary | mask_ref]
         return cl_df[mask_primary]
+
+    def cl_match_by_refs(cl_df, ref_candidates):
+        """
+        Try to match any of the candidate reference tokens (extracted from VL particulars)
+        against CL doc_no_clean or doc_ref_no_clean.
+        Returns (matched_row_or_None, matched_token).
+        """
+        for token in ref_candidates:
+            if not token or len(token) < 4:
+                continue
+            # Exact match on doc_no_clean
+            m = cl_df[cl_df['doc_no_clean'] == token]
+            if not m.empty:
+                return m.iloc[0], token
+            # Exact match on doc_ref_no_clean
+            if 'doc_ref_no_clean' in cl_df.columns:
+                m = cl_df[(cl_df['doc_ref_no_clean'] == token) & (cl_df['doc_ref_no_clean'] != '')]
+                if not m.empty:
+                    return m.iloc[0], token
+            # Partial: CL doc_no starts with or contains the token (min 6 chars to avoid noise)
+            if len(token) >= 6:
+                m = cl_df[cl_df['doc_no_clean'].str.contains(token, na=False, regex=False)]
+                if not m.empty:
+                    return m.iloc[0], f'partial:{token}'
+                if 'doc_ref_no_clean' in cl_df.columns:
+                    m = cl_df[
+                        (cl_df['doc_ref_no_clean'].str.contains(token, na=False, regex=False)) &
+                        (cl_df['doc_ref_no_clean'] != '')
+                    ]
+                    if not m.empty:
+                        return m.iloc[0], f'partial_ref:{token}'
+        return None, ''
     results = {
         'invoice_matched': [],
         'invoice_unmatched_vl': [],      # Tax Invoice / Sales Invoice only
@@ -864,6 +915,18 @@ def run_reconciliation(vl_orig, cl_orig, tolerance=1.0):
 
     for idx, vrow in vl_inv.iterrows():
         matches = cl_match_doc(cl_inv[~cl_inv['_matched']], vrow['doc_no_clean'])
+        match_basis_inv = 'Document Number'
+        if matches.empty:
+            # Try matching via VL particulars reference tokens against CL
+            vl_part_raw = str(vrow.get('particulars', ''))
+            vl_part_refs = extract_all_refs_from_particulars(vl_part_raw)
+            if vl_part_refs:
+                crow_ref, token_ref = cl_match_by_refs(
+                    cl_inv[~cl_inv['_matched']], vl_part_refs
+                )
+                if crow_ref is not None:
+                    matches = cl_inv[cl_inv['_idx'] == crow_ref['_idx']]
+                    match_basis_inv = f'Particulars Ref ({token_ref})'
         if not matches.empty:
             crow = matches.iloc[0]
             matched_on = 'doc_no_clean' if crow['doc_no_clean'] == vrow['doc_no_clean'] else 'doc_ref_no_clean'
@@ -886,7 +949,7 @@ def run_reconciliation(vl_orig, cl_orig, tolerance=1.0):
                 'CL Type': crow.get('doc_type', ''),
                 'CL Debit': crow.get('debit', 0),
                 'CL Credit': crow.get('credit', 0),
-                'Match Basis': 'Document Number',
+                'Match Basis': match_basis_inv,
                 'Match Type': 'Invoice',
                 'Remark': 'Matched — Invoice',
             })
@@ -895,8 +958,11 @@ def run_reconciliation(vl_orig, cl_orig, tolerance=1.0):
     # STEP 2B: Match VL Credit Notes against CL Discount
     #          Debit Notes and PRN entries
     # Matching order:
-    #   1st — Document Number (exact)
-    #   2nd — Period + Amount (within tolerance)
+    #   1st — Document Number (exact, VL doc_no vs CL doc_no / doc_ref_no)
+    #   2nd — VL Particulars refs vs CL doc_no / doc_ref_no (NEW)
+    #   3rd — Period + Amount (within tolerance)
+    #   4th — Doc number match against ALL unmatched CL (broader fallback)
+    #   5th — Particulars refs vs ALL unmatched CL (broader fallback, NEW)
     # ════════════════════════════════════════════════════
     vl_cn = vl[
         (~vl['_matched']) &
@@ -919,6 +985,10 @@ def run_reconciliation(vl_orig, cl_orig, tolerance=1.0):
         basis = ''
         crow = None
 
+        # Extract all candidate refs from VL particulars for this credit note
+        vl_particulars_raw = str(vrow.get('particulars', ''))
+        vl_particulars_refs = extract_all_refs_from_particulars(vl_particulars_raw)
+
         # 1st: match by document number against discount/PRN pool
         if not cl_disc.empty:
             doc_m = cl_match_doc(cl_disc[~cl_disc['_matched']], vrow['doc_no_clean'])
@@ -927,7 +997,17 @@ def run_reconciliation(vl_orig, cl_orig, tolerance=1.0):
                 matched = True
                 basis = 'Document Number (Credit Note ↔ Discount/PRN)'
 
-        # 2nd: match by period + amount against discount/PRN pool
+        # 2nd: match by VL particulars reference tokens against discount/PRN pool
+        if not matched and vl_particulars_refs and not cl_disc.empty:
+            crow_ref, token_ref = cl_match_by_refs(
+                cl_disc[~cl_disc['_matched']], vl_particulars_refs
+            )
+            if crow_ref is not None:
+                crow = crow_ref
+                matched = True
+                basis = f'Particulars Ref ({token_ref}) ↔ Discount/PRN'
+
+        # 3rd: match by period + amount against discount/PRN pool
         if not matched and not cl_disc.empty:
             vamt = round_amount(vrow['debit'] + vrow['credit'])
             if vamt > 0:
@@ -941,13 +1021,23 @@ def run_reconciliation(vl_orig, cl_orig, tolerance=1.0):
                     matched = True
                     basis = 'Period + Amount (Credit Note ↔ Discount/PRN)'
 
-        # 3rd: try doc number match against ALL unmatched CL (broader fallback)
+        # 4th: try doc number match against ALL unmatched CL (broader fallback)
         if not matched:
             doc_m2 = cl_match_doc(cl_any_unmatched[~cl_any_unmatched['_matched']], vrow['doc_no_clean'])
             if not doc_m2.empty:
                 crow = doc_m2.iloc[0]
                 matched = True
                 basis = 'Document Number (Credit Note ↔ CL Entry)'
+
+        # 5th: match by VL particulars reference tokens against ALL unmatched CL (NEW)
+        if not matched and vl_particulars_refs:
+            crow_ref2, token_ref2 = cl_match_by_refs(
+                cl_any_unmatched[~cl_any_unmatched['_matched']], vl_particulars_refs
+            )
+            if crow_ref2 is not None:
+                crow = crow_ref2
+                matched = True
+                basis = f'Particulars Ref ({token_ref2}) ↔ CL Entry'
 
         if matched and crow is not None:
             vl.at[idx, '_matched'] = True
