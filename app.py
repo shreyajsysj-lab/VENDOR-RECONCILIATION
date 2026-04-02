@@ -426,8 +426,9 @@ def _parse_ledger_raw(raw_df):
 def _map_columns(df):
     """
     Map raw column names to standardised internal names
-    (doc_date, doc_no, doc_type, particulars, debit, credit, closing).
+    (doc_date, doc_no, doc_ref_no, doc_type, particulars, debit, credit, closing).
     Works for any ERP export format — Tally, SAP, Oracle, Zoho, QuickBooks, custom.
+    Handles CL ledgers that have BOTH a Voucher No and a Voucher Ref No column.
     """
     col_map = {}
     already_mapped = set()   # prevent mapping two cols to same target
@@ -436,6 +437,15 @@ def _map_columns(df):
         if target not in already_mapped:
             col_map[col_name] = target
             already_mapped.add(target)
+
+    # First pass: find voucher ref no BEFORE generic voucher/no matching
+    # so that the primary doc_no gets the plain voucher number, not the ref
+    ref_candidates = []
+    for c in df.columns:
+        cl = str(c).lower().strip()
+        if ('ref' in cl or 'reference' in cl) and ('no' in cl or 'num' in cl or 'number' in cl) \
+                and ('voucher' in cl or 'vch' in cl or 'doc' in cl or 'invoice' in cl):
+            ref_candidates.append(c)
 
     for c in df.columns:
         cl = str(c).lower().strip()
@@ -449,9 +459,16 @@ def _map_columns(df):
                 and 'date' not in cl:
             try_map('doc_type', c)
 
-        # Doc No — broad match: no, num, number, ref, voucher, vch, details, doc no
+        # Doc Ref No — secondary number (Voucher Ref No, Doc Ref No, Ref No, etc.)
+        # Must match BEFORE primary doc_no to reserve it separately
+        elif c in ref_candidates and 'doc_ref_no' not in already_mapped:
+            try_map('doc_ref_no', c)
+
+        # Doc No — primary: plain voucher no, doc no, number, details
+        # Excludes ref columns (already captured above)
         elif 'doc_no' not in already_mapped and 'date' not in cl and 'type' not in cl \
-                and any(k in cl for k in ['no.','no ','num','voucher','vch','ref','detail',
+                and c not in ref_candidates \
+                and any(k in cl for k in ['no.','no ','num','voucher','vch','detail',
                                            'invoice no','bill no']):
             try_map('doc_no', c)
 
@@ -553,6 +570,18 @@ def _load_any_ledger(file, is_vendor=True):
     df['doc_no_clean'] = df['doc_no'].apply(clean_doc_number)
     df['period']       = df['doc_date'].apply(get_period)
 
+    # Secondary reference number (Voucher Ref No) — common in CL exports
+    if 'doc_ref_no' in df.columns:
+        try:
+            df['doc_ref_no'] = df['doc_ref_no'].fillna('').astype(str).str.strip()
+            df['doc_ref_no'] = df['doc_ref_no'].replace({'nan': '', 'None': '', 'NaN': ''})
+        except Exception:
+            df['doc_ref_no'] = ''
+        df['doc_ref_no_clean'] = df['doc_ref_no'].apply(clean_doc_number)
+    else:
+        df['doc_ref_no'] = ''
+        df['doc_ref_no_clean'] = ''
+
     if is_vendor:
         try:
             df['particulars'] = df['particulars'].fillna('').astype(str)
@@ -560,8 +589,10 @@ def _load_any_ledger(file, is_vendor=True):
             df['particulars'] = ''
         df['particulars_ref'] = df['particulars'].apply(extract_ref_from_particulars)
 
-    # Filter to rows that have a doc number
-    df = df[df['doc_no_clean'].astype(str) != ''].reset_index(drop=True)
+    # Filter to rows that have at least one of: doc_no or doc_ref_no
+    has_doc = df['doc_no_clean'].astype(str) != ''
+    has_ref = df['doc_ref_no_clean'].astype(str) != ''
+    df = df[has_doc | has_ref].reset_index(drop=True)
     df['_idx']       = df.index
     df['_remark']    = ''
     df['_match_ref'] = ''
@@ -599,6 +630,19 @@ def run_reconciliation(vl_orig, cl_orig, tolerance=1.0):
     STEP 4 — Match collections by UTR → period+amount
     STEP 5 — All remaining → Unmatched
     """
+
+    def cl_match_doc(cl_df, key):
+        """
+        Match a VL doc_no_clean key against CL rows checking BOTH:
+          - doc_no_clean  (primary Voucher No column)
+          - doc_ref_no_clean (secondary Voucher Ref No column, if present)
+        Returns subset of cl_df that matches on either column.
+        """
+        mask_primary = cl_df['doc_no_clean'] == key
+        if 'doc_ref_no_clean' in cl_df.columns:
+            mask_ref = (cl_df['doc_ref_no_clean'] == key) & (cl_df['doc_ref_no_clean'] != '')
+            return cl_df[mask_primary | mask_ref]
+        return cl_df[mask_primary]
     results = {
         'invoice_matched': [],
         'invoice_unmatched_vl': [],      # Tax Invoice / Sales Invoice only
@@ -699,13 +743,13 @@ def run_reconciliation(vl_orig, cl_orig, tolerance=1.0):
             orig_doc_no = str(orig_match.get('doc_no', ''))
             orig_amount_val = round_amount(orig_match.get('debit', 0) + orig_match.get('credit', 0))
 
-            # Check if original invoice also exists in CL
+            # Check if original invoice also exists in CL (check both Voucher No and Voucher Ref No)
             cl_pool = cl[
                 (~cl['_matched']) &
                 (~cl['doc_type'].apply(is_debit_note)) &
                 (~cl['doc_type'].apply(lambda x: is_collection(x, '')))
             ]
-            cl_for_orig = cl_pool[cl_pool['doc_no_clean'] == orig_match['doc_no_clean']]
+            cl_for_orig = cl_match_doc(cl_pool, orig_match['doc_no_clean'])
 
             # Mark VL reversal row
             vl.at[idx, '_matched'] = True
@@ -819,12 +863,13 @@ def run_reconciliation(vl_orig, cl_orig, tolerance=1.0):
     ].copy()
 
     for idx, vrow in vl_inv.iterrows():
-        matches = cl_inv[(cl_inv['doc_no_clean'] == vrow['doc_no_clean']) & (~cl_inv['_matched'])]
+        matches = cl_match_doc(cl_inv[~cl_inv['_matched']], vrow['doc_no_clean'])
         if not matches.empty:
             crow = matches.iloc[0]
+            matched_on = 'doc_no_clean' if crow['doc_no_clean'] == vrow['doc_no_clean'] else 'doc_ref_no_clean'
             vl.at[idx, '_matched'] = True
             vl.at[idx, '_remark'] = 'Matched — Invoice'
-            vl.at[idx, '_match_ref'] = str(crow.get('doc_no', ''))
+            vl.at[idx, '_match_ref'] = str(crow.get('doc_no', '') or crow.get('doc_ref_no', ''))
             cl.at[crow['_idx'], '_matched'] = True
             cl.at[crow['_idx'], '_remark'] = 'Matched — Invoice'
             cl.at[crow['_idx'], '_match_ref'] = str(vrow.get('doc_no', ''))
@@ -836,6 +881,7 @@ def run_reconciliation(vl_orig, cl_orig, tolerance=1.0):
                 'VL Debit': vrow.get('debit', 0),
                 'VL Credit': vrow.get('credit', 0),
                 'CL Doc No': crow.get('doc_no', ''),
+                'CL Ref No': crow.get('doc_ref_no', ''),
                 'CL Date': crow.get('doc_date', ''),
                 'CL Type': crow.get('doc_type', ''),
                 'CL Debit': crow.get('debit', 0),
@@ -875,7 +921,7 @@ def run_reconciliation(vl_orig, cl_orig, tolerance=1.0):
 
         # 1st: match by document number against discount/PRN pool
         if not cl_disc.empty:
-            doc_m = cl_disc[(cl_disc['doc_no_clean'] == vrow['doc_no_clean']) & (~cl_disc['_matched'])]
+            doc_m = cl_match_doc(cl_disc[~cl_disc['_matched']], vrow['doc_no_clean'])
             if not doc_m.empty:
                 crow = doc_m.iloc[0]
                 matched = True
@@ -897,10 +943,7 @@ def run_reconciliation(vl_orig, cl_orig, tolerance=1.0):
 
         # 3rd: try doc number match against ALL unmatched CL (broader fallback)
         if not matched:
-            doc_m2 = cl_any_unmatched[
-                (cl_any_unmatched['doc_no_clean'] == vrow['doc_no_clean']) &
-                (~cl_any_unmatched['_matched'])
-            ]
+            doc_m2 = cl_match_doc(cl_any_unmatched[~cl_any_unmatched['_matched']], vrow['doc_no_clean'])
             if not doc_m2.empty:
                 crow = doc_m2.iloc[0]
                 matched = True
@@ -942,7 +985,7 @@ def run_reconciliation(vl_orig, cl_orig, tolerance=1.0):
     for idx, vrow in vl_dn.iterrows():
         matched = False
         basis = ''
-        doc_matches = cl_dn[(cl_dn['doc_no_clean'] == vrow['doc_no_clean']) & (~cl_dn['_matched'])]
+        doc_matches = cl_match_doc(cl_dn[~cl_dn['_matched']], vrow['doc_no_clean'])
         if not doc_matches.empty:
             crow = doc_matches.iloc[0]
             matched = True
@@ -1081,6 +1124,7 @@ def run_reconciliation(vl_orig, cl_orig, tolerance=1.0):
         cl.at[idx, '_remark'] = cl_unmatched_remark
         entry = {
             'Doc No': r.get('doc_no', ''),
+            'Ref No': r.get('doc_ref_no', ''),
             'Date': r.get('doc_date', ''),
             'Type': r.get('doc_type', ''),
             'Debit': r.get('debit', 0),
@@ -1378,7 +1422,7 @@ def build_excel(results, vl_orig, cl_orig, VL='Vendor', CL='Customer'):
     ws_cl.sheet_view.showGridLines = False
     ws_cl.freeze_panes = 'A4'
 
-    cl_display_cols = ['doc_date', 'doc_no', 'doc_type', 'debit', 'credit']
+    cl_display_cols = ['doc_date', 'doc_no', 'doc_ref_no', 'doc_type', 'debit', 'credit']
     cl_display_cols = [c for c in cl_display_cols if c in cl_ann.columns]
     cl_display_cols += ['_remark', '_match_ref']
     ncols_cl = len(cl_display_cols)
@@ -1403,8 +1447,8 @@ def build_excel(results, vl_orig, cl_orig, VL='Vendor', CL='Customer'):
     ws_cl.row_dimensions[2].height = 22
 
     # Row 3: Headers
-    cl_hmap = {'doc_date':'Doc Date','doc_no':'Doc No','doc_type':'Doc Type',
-               'debit':'Debit (LC)','credit':'Credit (LC)',
+    cl_hmap = {'doc_date':'Doc Date','doc_no':'Voucher No','doc_ref_no':'Voucher Ref No',
+               'doc_type':'Doc Type','debit':'Debit (LC)','credit':'Credit (LC)',
                '_remark':'Remark','_match_ref':'Matched With'}
     headers = [cl_hmap.get(c, c) for c in cl_display_cols]
     style_header(ws_cl, headers, row=3, color='1A6B45')
@@ -1751,6 +1795,7 @@ def main():
         Export both ledgers as <b>.xlsx</b> from your ERP (Tally, SAP, Oracle, Zoho, QuickBooks, etc.).<br>
         &nbsp;&nbsp;• <b>Vendor Ledger (VL):</b> The ledger your vendor has shared — shows how they have recorded transactions with you. Must have: Date, Doc No, Doc Type, Debit, Credit, Closing Balance.<br>
         &nbsp;&nbsp;• <b>Customer Ledger (CL):</b> Your own ledger — shows the same party's account in your books. Must have: Date, Doc No, Doc Type, Debit, Credit, Closing Balance.<br>
+        &nbsp;&nbsp;• <b>Voucher No vs Voucher Ref No:</b> Some ERP systems (especially Tally) export the CL with two number columns — <i>Voucher No</i> (system-generated internal number) and <i>Voucher Ref No</i> (the actual invoice reference). The app detects both automatically. During matching, it checks the VL invoice number against <b>both</b> columns in the CL — so a match is found even if the invoice number appears only in the Ref No column. Both columns are shown in the Customer Ledger tab and Excel output.<br>
         &nbsp;&nbsp;• The app auto-detects column headers. If columns are not detected, use the <b>Column Mapping</b> section below to assign them manually.<br>
         &nbsp;&nbsp;• The <b>Closing Balance</b> is read from the last row of the Closing/Balance column automatically.<br><br>
 
@@ -1802,7 +1847,7 @@ def main():
         &nbsp;&nbsp;B: Reversed in VL, NOT in CL → ✅ Internal only<br>
         &nbsp;&nbsp;C: No original found / amount mismatch → ❌ Unmatched<br><br>
         <b>Step 2 — Invoice Matching</b><br>
-        Matches VL Tax Invoices vs CL Invoices by exact Document Number. Excludes Credit Notes, DN, Collections.<br><br>
+        Matches VL Tax Invoices vs CL Invoices by exact Document Number. The VL invoice number is checked against <b>both</b> the CL Voucher No and Voucher Ref No columns. Excludes Credit Notes, DN, Collections.<br><br>
         <b>Step 2B — Credit Notes vs Discount DN/PRN</b><br>
         VL Credit Notes (incl. Saleable Return, Non-Saleable) matched against CL Discount Debit Notes and PRN entries. First by Doc No, then by Period+Amount.<br><br>
         <b>Step 3 — Debit Note Matching</b><br>
@@ -2025,8 +2070,9 @@ def main():
             st.dataframe(vl[display_cols].head(10), use_container_width=True, hide_index=True)
         with pc2:
             st.markdown(f'<span class="section-tag tag-cl">{CL} — CUSTOMER LEDGER</span>', unsafe_allow_html=True)
-            display_cols = [c for c in ['doc_date', 'doc_no', 'doc_type', 'debit', 'credit'] if c in cl.columns]
-            st.dataframe(cl[display_cols].head(10), use_container_width=True, hide_index=True)
+            display_cols = [c for c in ['doc_date', 'doc_no', 'doc_ref_no', 'doc_type', 'debit', 'credit'] if c in cl.columns]
+            preview_cl = cl[display_cols].head(10).rename(columns={'doc_no': 'Voucher No', 'doc_ref_no': 'Voucher Ref No'})
+            st.dataframe(preview_cl, use_container_width=True, hide_index=True)
 
     if st.button("▶ Run Reconciliation", use_container_width=False):
         with st.spinner("Running reconciliation engine..."):
@@ -2454,7 +2500,17 @@ def main():
             for col in disp.columns:
                 if 'date' in col.lower():
                     disp[col] = pd.to_datetime(disp[col], errors='coerce').dt.strftime('%d-%b-%Y').fillna('')
+            # Rename for display clarity
+            rename_display = {'doc_no': 'Voucher No', 'doc_ref_no': 'Voucher Ref No',
+                              'doc_type': 'Doc Type', 'doc_date': 'Date',
+                              '_remark': 'Remark', '_match_ref': 'Matched With'}
+            disp = disp.rename(columns=rename_display)
+            # Drop internal helper columns
+            drop_cols = [c for c in disp.columns if c in ('doc_no_clean','doc_ref_no_clean','period','_idx','_matched')]
+            disp = disp.drop(columns=drop_cols, errors='ignore')
             st.dataframe(disp, use_container_width=True, hide_index=True)
+            if cl_closing_val:
+                st.info(f"**{CL} Closing Balance: {fmt_inr(cl_closing_val)}**")
 
 
 if __name__ == "__main__":
