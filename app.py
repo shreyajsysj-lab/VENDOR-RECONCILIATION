@@ -568,9 +568,16 @@ def _map_columns(df):
 def _load_any_ledger(file, is_vendor=True):
     """
     Universal ledger loader — works with ANY Excel format from any ERP.
-    Reads raw, detects header, maps columns, handles all edge cases safely.
+
+    Strategy:
+    - Read the file ONCE as raw strings (dtype=str) — this is the source of truth.
+    - Keep a completely untouched copy (raw_display_df) with original column names
+      and original cell values. This is used for ALL display sheets.
+    - Build a mapped/processed copy (df) with standardised internal column names
+      and type-converted values. This is used ONLY for reconciliation logic.
+    - Return (df, closing_val). raw_display_df rows are linked to df via '_raw_idx'.
     """
-    # Read all as strings first to avoid type-inference errors
+    # Read all as strings — preserves original cell values including dates exactly as typed
     try:
         raw = pd.read_excel(file, header=None, dtype=str)
     except Exception:
@@ -579,7 +586,7 @@ def _load_any_ledger(file, is_vendor=True):
     # Detect header row
     header_idx = _detect_header_row(raw)
 
-    # Build column names safely
+    # Build column names safely from header row
     try:
         hdr_series = raw.iloc[header_idx]
         col_names = []
@@ -592,25 +599,28 @@ def _load_any_ledger(file, is_vendor=True):
     except Exception:
         col_names = [f'_Col{i}' for i in range(len(raw.columns))]
 
-    # Data = rows after header
+    # Data rows = everything after the header row — as raw strings, untouched
     data = raw.iloc[header_idx + 1:].copy().reset_index(drop=True)
     data.columns = col_names
 
-    # Capture closing balance BEFORE filtering (closing row has no doc no)
+    # Capture closing balance BEFORE any row filtering
     closing_val = _get_closing_from_raw(data)
 
-    # Map columns
+    # ── DISPLAY COPY: completely untouched, original column names, original values ──
+    raw_display_df = data.copy()
+    raw_display_df['_raw_row'] = raw_display_df.index   # link back to df after filtering
+
+    # ── PROCESSING COPY: map to internal names, type-convert for reconciliation ──
     col_map = _map_columns(data)
     df = data.rename(columns=col_map)
 
-    # Ensure all needed columns exist — always load particulars for BOTH VL and CL
-    # CL exports often carry UTR/narration in particulars; without it collections can't match
+    # Ensure all needed columns exist
     needed = ['doc_date','doc_no','doc_type','particulars','debit','credit','closing']
     for col in needed:
         if col not in df.columns:
             df[col] = ''
 
-    # Safe conversions — each wrapped so one bad column cannot crash the whole load
+    # Type conversions for reconciliation — only on the processing copy
     try:
         df['doc_date'] = pd.to_datetime(df['doc_date'], errors='coerce', dayfirst=True)
     except Exception:
@@ -627,7 +637,6 @@ def _load_any_ledger(file, is_vendor=True):
     except Exception:
         df['closing'] = np.nan
 
-    # doc_no: safe string conversion
     try:
         df['doc_no'] = df['doc_no'].fillna('').astype(str).str.strip()
         df['doc_no'] = df['doc_no'].replace({'nan': '', 'None': '', 'NaN': ''})
@@ -637,7 +646,6 @@ def _load_any_ledger(file, is_vendor=True):
     df['doc_no_clean'] = df['doc_no'].apply(clean_doc_number)
     df['period']       = df['doc_date'].apply(get_period)
 
-    # Secondary reference number (Voucher Ref No) — common in CL exports
     if 'doc_ref_no' in df.columns:
         try:
             df['doc_ref_no'] = df['doc_ref_no'].fillna('').astype(str).str.strip()
@@ -649,28 +657,63 @@ def _load_any_ledger(file, is_vendor=True):
         df['doc_ref_no'] = ''
         df['doc_ref_no_clean'] = ''
 
-    # Always load particulars for both VL and CL — needed for UTR extraction in collections
     try:
         df['particulars'] = df['particulars'].fillna('').astype(str)
     except Exception:
         df['particulars'] = ''
     df['particulars_ref'] = df['particulars'].apply(extract_ref_from_particulars)
 
-    if is_vendor:
-        pass  # VL already handled above
+    # ── Capture _orig_ values BEFORE row-filtering, using the pre-filter index ──
+    # data was read as dtype=str so all values are already original strings from the file.
+    # We store them keyed by the original integer index so they survive row-filtering correctly.
+    inv_col_map = {v: k for k, v in col_map.items()}  # internal_name -> original_file_col_name
 
-    # Keep rows that have:
-    #   - a doc_no, OR
-    #   - a doc_ref_no, OR
-    #   - a valid date with a non-zero debit or credit (catches payment rows where UTR is in particulars)
+    def _orig_series(internal_name):
+        """Return a Series of original string values indexed by data's integer index."""
+        orig_col = inv_col_map.get(internal_name)
+        if orig_col and orig_col in data.columns:
+            return data[orig_col].fillna('').astype(str).replace(
+                {'nan': '', 'None': '', 'NaN': '', 'NaT': ''})
+        # Fallback: data was already renamed — check df before filtering
+        if internal_name in df.columns:
+            col_data = df[internal_name]
+            def _fmt(v):
+                if isinstance(v, pd.Timestamp):
+                    return v.strftime('%d-%b-%Y') if pd.notna(v) else ''
+                try:
+                    return '' if pd.isna(v) else str(v)
+                except Exception:
+                    return str(v)
+            return col_data.apply(_fmt)
+        return pd.Series('', index=df.index)
+
+    orig_snapshots = {}
+    for iname in ['doc_date','doc_no','doc_ref_no','doc_type','particulars','debit','credit','closing']:
+        orig_snapshots[iname] = _orig_series(iname)
+
+    # Keep valid data rows (doc_no OR doc_ref_no OR date+amount)
     has_doc  = df['doc_no_clean'].astype(str).str.strip() != ''
     has_ref  = df['doc_ref_no_clean'].astype(str).str.strip() != ''
     has_date = df['doc_date'].notna()
     has_amt  = (df['debit'].fillna(0) != 0) | (df['credit'].fillna(0) != 0)
-    df = df[has_doc | has_ref | (has_date & has_amt)].reset_index(drop=True)
+    keep_mask = has_doc | has_ref | (has_date & has_amt)
+
+    # Record the pre-filter integer indices of kept rows so we can align _orig_ correctly
+    kept_indices = df[keep_mask].index  # integer index positions in data / orig_snapshots
+
+    df = df[keep_mask].reset_index(drop=True)
     df['_idx']       = df.index
     df['_remark']    = ''
     df['_match_ref'] = ''
+
+    # ── Attach _orig_ columns using the pre-filter indices (correct alignment) ──
+    # _orig_ columns hold the EXACT original string values from the uploaded file.
+    # They are used for display only — reconciliation uses the converted columns internally.
+    for iname in ['doc_date','doc_no','doc_ref_no','doc_type','particulars','debit','credit','closing']:
+        orig_key = f'_orig_{iname}'
+        snap = orig_snapshots[iname]
+        # Reindex to the kept rows, then assign as a plain list (index already reset in df)
+        df[orig_key] = snap.reindex(kept_indices).fillna('').values
 
     return df, closing_val
 
@@ -1370,6 +1413,26 @@ def run_reconciliation(vl_orig, cl_orig, tolerance=1.0):
             # Only pure tax invoices / sales invoices
             results['invoice_unmatched_vl'].append(entry)
 
+    # Build a lookup from raw_display_df for original cell values
+    raw_cl_df = cl_orig.attrs.get('raw_display_df', None)
+    cl_col_map_recon = cl_orig.attrs.get('col_map', {})
+    rev_cl_col = {v: k for k, v in cl_col_map_recon.items()}   # internal -> original col name
+
+    def _get_raw_cl_val(r, internal_col):
+        """Get original file value for a CL row using raw_display_df."""
+        raw_row = r.get('_raw_row', None)
+        orig_col = rev_cl_col.get(internal_col)
+        if raw_cl_df is not None and raw_row is not None and orig_col and orig_col in raw_cl_df.columns:
+            try:
+                val = raw_cl_df.loc[raw_row, orig_col]
+                if pd.isna(val): return ''
+                return str(val).strip() if str(val) not in ('nan','None','NaN') else ''
+            except Exception:
+                pass
+        # fallback to processed value
+        val = r.get(internal_col, '')
+        return '' if str(val) in ('nan','None','NaN','NaT') else str(val) if val else ''
+
     for idx, r in cl[~cl['_matched']].iterrows():
         doc_t = str(r.get('doc_type', ''))
         sub_type = get_doc_sub_type(doc_t)
@@ -1380,27 +1443,17 @@ def run_reconciliation(vl_orig, cl_orig, tolerance=1.0):
         else:
             cl_unmatched_remark = 'Unmatched — Tax Invoice'
         cl.at[idx, '_remark'] = cl_unmatched_remark
-        # Always include Date, Ref No, and Particulars clearly in every CL entry
-        raw_date = r.get('doc_date', '')
-        try:
-            dt_parsed = pd.to_datetime(raw_date, errors='coerce')
-            fmt_date = dt_parsed.strftime('%d-%b-%Y') if pd.notna(dt_parsed) else ''
-        except Exception:
-            fmt_date = str(raw_date)
-        ref_no_val = str(r.get('doc_ref_no', '') or '')
-        ref_no_val = '' if ref_no_val in ('nan', 'None', 'NaN') else ref_no_val
-        particulars_val = str(r.get('particulars', '') or '')
-        particulars_val = '' if particulars_val in ('nan', 'None', 'NaN') else particulars_val
+        # Pull original values from raw file — no transformation, no date reformatting
         entry = {
-            'Voucher No': r.get('doc_no', ''),
-            'Voucher Ref No': ref_no_val,           # always shown
-            'Date': fmt_date,                        # always shown, formatted DD-Mon-YYYY
-            'Doc Type': r.get('doc_type', ''),
-            'Particulars': particulars_val,          # always shown — contains UTR for collections
-            'Debit': r.get('debit', 0),
-            'Credit': r.get('credit', 0),
-            'Source': 'Customer Ledger',
-            'Remark': cl_unmatched_remark,
+            'Voucher No':      _get_raw_cl_val(r, 'doc_no'),
+            'Voucher Ref No':  _get_raw_cl_val(r, 'doc_ref_no'),
+            'Date':            _get_raw_cl_val(r, 'doc_date'),       # original date string from file
+            'Doc Type':        _get_raw_cl_val(r, 'doc_type'),
+            'Particulars':     _get_raw_cl_val(r, 'particulars'),
+            'Debit':           r.get('debit', 0),
+            'Credit':          r.get('credit', 0),
+            'Source':          'Customer Ledger',
+            'Remark':          cl_unmatched_remark,
         }
         if is_debit_note(doc_t):
             if sub_type == 'debit_note_with_tax':
@@ -1625,9 +1678,21 @@ def build_excel(results, vl_orig, cl_orig, VL='Vendor', CL='Customer'):
     ws_vl.sheet_view.showGridLines = False
     ws_vl.freeze_panes = 'A4'
 
-    vl_display_cols = ['doc_date', 'doc_no', 'doc_type', 'particulars', 'debit', 'credit', 'closing']
-    vl_display_cols = [c for c in vl_display_cols if c in vl_ann.columns]
-    vl_display_cols += ['_remark', '_match_ref']
+    # Use _orig_ columns for VL display (original file values), fall back to mapped cols
+    def _vl_col(name):
+        orig = f'_orig_{name}'
+        return orig if orig in vl_ann.columns else (name if name in vl_ann.columns else None)
+
+    vl_display_map = {}
+    for name, label in [('doc_date','Date'), ('doc_no','Doc No'), ('doc_type','Doc Type'),
+                         ('particulars','Particulars'), ('debit','Debit'), ('credit','Credit'),
+                         ('closing','Closing Balance')]:
+        col = _vl_col(name)
+        if col:
+            vl_display_map[label] = col
+
+    vl_display_cols = list(vl_display_map.values()) + ['_remark', '_match_ref']
+    vl_header_labels = list(vl_display_map.keys()) + ['Remark', 'Matched With']
     ncols_vl = len(vl_display_cols)
 
     # Row 1: Title
@@ -1649,15 +1714,11 @@ def build_excel(results, vl_orig, cl_orig, VL='Vendor', CL='Customer'):
     ws_vl.cell(row=2, column=1).value = 'SUBTOTAL ▲'
     ws_vl.row_dimensions[2].height = 22
 
-    # Row 3: Headers
-    vl_hmap = {'doc_date':'Doc Date','doc_no':'Doc No','doc_type':'Doc Type',
-               'particulars':'Particulars','debit':'Debit','credit':'Credit',
-               'closing':'Closing Balance','_remark':'Remark','_match_ref':'Matched With'}
-    headers = [vl_hmap.get(c, c) for c in vl_display_cols]
-    style_header(ws_vl, headers, row=3, color='1A3A6B')
+    # Row 3: Headers — use vl_header_labels built from _orig_ columns
+    style_header(ws_vl, vl_header_labels, row=3, color='1A3A6B')
 
-    debit_col_vl  = (vl_display_cols.index('debit')  + 1) if 'debit'  in vl_display_cols else None
-    credit_col_vl = (vl_display_cols.index('credit') + 1) if 'credit' in vl_display_cols else None
+    debit_col_vl  = (vl_header_labels.index('Debit')  + 1) if 'Debit'  in vl_header_labels else None
+    credit_col_vl = (vl_header_labels.index('Credit') + 1) if 'Credit' in vl_header_labels else None
 
     # Data starts at row 4
     VL_DATA_START = 4
@@ -1695,21 +1756,32 @@ def build_excel(results, vl_orig, cl_orig, VL='Vendor', CL='Customer'):
 
     # ══════════════════════════════════════════
     # SHEET 3: CUSTOMER LEDGER WITH REMARKS
+    # Use _orig_ columns — original file values, never transformed
     # ══════════════════════════════════════════
-    cl_ann = cl_orig
     ws_cl = wb.create_sheet(f'{CL[:18]} Customer Ledger'[:31])
     ws_cl.sheet_view.showGridLines = False
     ws_cl.freeze_panes = 'A4'
 
-    # Always show: Date, Voucher No, Voucher Ref No, Doc Type, Particulars, Debit, Credit
-    # doc_date and doc_ref_no MUST always be included — never skip them
-    cl_display_cols = ['doc_date', 'doc_no', 'doc_ref_no', 'doc_type', 'particulars', 'debit', 'credit']
-    # Ensure every column actually exists in the dataframe (add blank if missing)
-    for col in cl_display_cols:
-        if col not in cl_ann.columns:
-            cl_ann = cl_ann.copy()
-            cl_ann[col] = ''
-    cl_display_cols += ['_remark', '_match_ref']
+    cl_ann = cl_orig
+
+    # Build display col list using _orig_ (original file value) where available,
+    # falling back to the mapped/converted column only if _orig_ not present.
+    def _cl_col(name):
+        orig = f'_orig_{name}'
+        if orig in cl_ann.columns:
+            return orig
+        return name if name in cl_ann.columns else None
+
+    cl_display_map = {}   # label -> actual df column
+    for name, label in [('doc_date','Date'), ('doc_no','Voucher No'), ('doc_ref_no','Voucher Ref No'),
+                         ('doc_type','Doc Type'), ('particulars','Particulars / Narration'),
+                         ('debit','Debit (LC)'), ('credit','Credit (LC)')]:
+        col = _cl_col(name)
+        if col:
+            cl_display_map[label] = col
+
+    cl_display_cols  = list(cl_display_map.values()) + ['_remark', '_match_ref']
+    cl_header_labels = list(cl_display_map.keys())   + ['Remark', 'Matched With']
     ncols_cl = len(cl_display_cols)
 
     # Row 1: Title
@@ -1731,18 +1803,14 @@ def build_excel(results, vl_orig, cl_orig, VL='Vendor', CL='Customer'):
     ws_cl.cell(row=2, column=1).value = 'SUBTOTAL ▲'
     ws_cl.row_dimensions[2].height = 22
 
-    # Row 3: Headers — always include Date, Voucher No, Voucher Ref No clearly
-    cl_hmap = {'doc_date':'Date','doc_no':'Voucher No','doc_ref_no':'Voucher Ref No',
-               'doc_type':'Doc Type','particulars':'Particulars / Narration',
-               'debit':'Debit (LC)','credit':'Credit (LC)',
-               '_remark':'Remark','_match_ref':'Matched With'}
-    headers = [cl_hmap.get(c, c) for c in cl_display_cols]
-    style_header(ws_cl, headers, row=3, color='1A6B45')
+    # Row 3: Headers — use cl_header_labels built from _orig_ columns
+    style_header(ws_cl, cl_header_labels, row=3, color='1A6B45')
 
-    debit_col_cl  = (cl_display_cols.index('debit')  + 1) if 'debit'  in cl_display_cols else None
-    credit_col_cl = (cl_display_cols.index('credit') + 1) if 'credit' in cl_display_cols else None
+    # Find debit/credit columns by label
+    debit_col_cl  = (cl_header_labels.index('Debit (LC)')  + 1) if 'Debit (LC)'  in cl_header_labels else None
+    credit_col_cl = (cl_header_labels.index('Credit (LC)') + 1) if 'Credit (LC)' in cl_header_labels else None
 
-    # Data starts at row 4
+    # Data starts at row 4 — write original values exactly as they appear in the file
     CL_DATA_START = 4
     for r_idx, (_, row) in enumerate(cl_ann[cl_display_cols].iterrows(), CL_DATA_START):
         remark = str(row.get('_remark', ''))
@@ -2372,18 +2440,27 @@ def main():
             results = run_reconciliation(vl, cl, tolerance=tolerance)
 
         def safe_records(df):
-            """Convert DataFrame to list of dicts safely — handles any column types."""
+            """Convert DataFrame to list of dicts safely — handles any column types.
+            _orig_ columns are kept as plain strings (original file values, no reformatting).
+            Internal helper cols (_idx, _matched etc.) are cleaned.
+            Date columns are formatted as DD-Mon-YYYY for display.
+            """
             if not isinstance(df, pd.DataFrame):
                 return df  # already a list or other type
             d = df.copy()
             for col in list(d.columns):
                 try:
-                    if col.startswith('_'):
-                        d[col] = d[col].astype(str).replace('nan', '').replace('None', '')
+                    if col.startswith('_orig_'):
+                        # Original file value — keep exactly as string, no reformatting
+                        d[col] = d[col].fillna('').astype(str).replace({'nan': '', 'None': '', 'NaT': ''})
+                    elif col.startswith('_'):
+                        # Internal helper columns
+                        d[col] = d[col].astype(str).replace({'nan': '', 'None': '', 'NaT': ''})
+                    elif hasattr(d[col], 'dtype') and str(d[col].dtype).startswith('datetime'):
+                        # Format datetimes nicely — but keep blank if NaT
+                        d[col] = d[col].apply(lambda v: v.strftime('%d-%b-%Y') if pd.notna(v) else '')
                     elif hasattr(d[col], 'dtype') and d[col].dtype == object:
                         d[col] = d[col].fillna('').astype(str)
-                    elif hasattr(d[col], 'dtype') and str(d[col].dtype).startswith('datetime'):
-                        d[col] = d[col].astype(str)
                 except Exception:
                     try:
                         d[col] = d[col].fillna('').astype(str)
@@ -2843,18 +2920,28 @@ def main():
         st.caption(f"🟢 Green = Matched | 🔴 Red = Unmatched | 🟡 Yellow = Reversal")
         if not vl_ann_df.empty:
             disp = vl_ann_df.copy()
-            # Format date column safely — preserve original value if parse fails
-            def _safe_date_vl(v):
-                try:
-                    parsed = pd.to_datetime(v, errors='coerce', dayfirst=True)
-                    if pd.notna(parsed):
-                        return parsed.strftime('%d-%b-%Y')
-                except Exception:
-                    pass
-                return str(v) if v not in (None, '', 'nan', 'NaT') else ''
-            for col in disp.columns:
-                if 'date' in col.lower():
-                    disp[col] = disp[col].apply(_safe_date_vl)
+            # Use _orig_ columns for display (original file values), fall back to mapped cols
+            col_rename_vl = {}
+            display_order_vl = []
+            for mapped, label in [
+                ('doc_date',    'Date'),
+                ('doc_no',      'Doc No'),
+                ('doc_type',    'Doc Type'),
+                ('particulars', 'Particulars'),
+                ('debit',       'Debit'),
+                ('credit',      'Credit'),
+                ('closing',     'Closing Balance'),
+                ('_remark',     'Remark'),
+                ('_match_ref',  'Matched With'),
+            ]:
+                orig = f'_orig_{mapped}'
+                if orig in disp.columns:
+                    col_rename_vl[orig] = label
+                    display_order_vl.append(orig)
+                elif mapped in disp.columns:
+                    col_rename_vl[mapped] = label
+                    display_order_vl.append(mapped)
+            disp = disp[display_order_vl].rename(columns=col_rename_vl)
             if vl_closing_val:
                 st.info(f"**{VL} Closing Balance: {fmt_inr(vl_closing_val)}**")
             st.dataframe(disp, use_container_width=True, hide_index=True)
@@ -2863,34 +2950,30 @@ def main():
         st.markdown(f'<span class="section-tag tag-cl">📗 {CL} — CUSTOMER LEDGER WITH REMARKS</span>', unsafe_allow_html=True)
         st.caption(f"🟢 Green = Matched | 🔴 Red = Unmatched")
         if not cl_ann_df.empty:
-            disp = cl_ann_df.copy()
-            # Format date column safely — NEVER overwrite with blank if parse fails, keep original value
-            def _safe_date_fmt(v):
-                try:
-                    parsed = pd.to_datetime(v, errors='coerce', dayfirst=True)
-                    if pd.notna(parsed):
-                        return parsed.strftime('%d-%b-%Y')
-                except Exception:
-                    pass
-                s = str(v) if v not in (None, '', 'nan', 'NaT', float('nan')) else ''
-                return s
-            for col in disp.columns:
-                if 'date' in col.lower():
-                    disp[col] = disp[col].apply(_safe_date_fmt)
-            # Rename for display clarity — always show Date, Voucher No, Voucher Ref No clearly
-            rename_display = {
-                'doc_no':      'Voucher No',
-                'doc_ref_no':  'Voucher Ref No',
-                'doc_type':    'Doc Type',
-                'doc_date':    'Date',
-                'particulars': 'Particulars / Narration',
-                '_remark':     'Remark',
-                '_match_ref':  'Matched With',
-            }
-            disp = disp.rename(columns=rename_display)
-            # Drop ONLY internal helper columns — never drop Date, Ref No or any data column
-            drop_cols = [c for c in disp.columns if c in ('doc_no_clean','doc_ref_no_clean','period','_idx','_matched','particulars_ref')]
-            disp = disp.drop(columns=drop_cols, errors='ignore')
+            # Use raw_display_df — original file values, original column names, nothing changed
+            raw_cl_ui = cl_ann_df.attrs.get('raw_display_df', None)
+            if raw_cl_ui is not None and not raw_cl_ui.empty:
+                remark_lkp   = cl_ann_df.set_index('_raw_row')['_remark'].to_dict()
+                matchref_lkp = cl_ann_df.set_index('_raw_row')['_match_ref'].to_dict()
+                survived     = set(cl_ann_df['_raw_row'].tolist())
+                disp = raw_cl_ui[raw_cl_ui['_raw_row'].isin(survived)].copy()
+                disp['Remark']       = disp['_raw_row'].map(remark_lkp).fillna('')
+                disp['Matched With'] = disp['_raw_row'].map(matchref_lkp).fillna('')
+                disp = disp.drop(columns=['_raw_row'], errors='ignore')
+                # Remove auto-named blank columns
+                disp = disp[[c for c in disp.columns if not c.startswith('_Col')]]
+            else:
+                # Fallback: use processed df, rename internal cols
+                disp = cl_ann_df.copy()
+                disp = disp.rename(columns={
+                    'doc_no':'Voucher No','doc_ref_no':'Voucher Ref No',
+                    'doc_date':'Date','doc_type':'Doc Type',
+                    'particulars':'Particulars','_remark':'Remark','_match_ref':'Matched With'
+                })
+                drop_cols = [c for c in disp.columns if c in
+                             ('doc_no_clean','doc_ref_no_clean','period','_idx','_matched',
+                              'particulars_ref','_raw_row')]
+                disp = disp.drop(columns=drop_cols, errors='ignore')
             if cl_closing_val:
                 st.info(f"**{CL} Closing Balance: {fmt_inr(cl_closing_val)}**")
             st.dataframe(disp, use_container_width=True, hide_index=True)
