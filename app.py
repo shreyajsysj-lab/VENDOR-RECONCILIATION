@@ -1269,41 +1269,35 @@ def run_reconciliation(vl_orig, cl_orig, tolerance=1.0):
     for idx, vrow in vl_col.iterrows():
         matched = False
         basis = ''
-        if vrow['utr']:
-            # Match by UTR + same month (trust-to-collection: same month ensures correct period)
-            utr_matches = cl_col[
+        crow = None
+
+        # PRIMARY MATCH: UTR + SAME PERIOD (both must match — as instructed)
+        if vrow['utr'] and vrow['period']:
+            utr_period_matches = cl_col[
                 (cl_col['utr'] == vrow['utr']) &
                 (cl_col['utr'] != '') &
                 (cl_col['period'] == vrow['period']) &
                 (~cl_col['_matched'])
             ]
-            if not utr_matches.empty:
-                crow = utr_matches.iloc[0]
+            if not utr_period_matches.empty:
+                crow = utr_period_matches.iloc[0]
                 matched = True
-                basis = 'UTR Number + Same Month'
-            else:
-                # Fallback: UTR match across any month (UTR is globally unique)
-                utr_matches_any = cl_col[
-                    (cl_col['utr'] == vrow['utr']) &
-                    (cl_col['utr'] != '') &
-                    (~cl_col['_matched'])
-                ]
-                if not utr_matches_any.empty:
-                    crow = utr_matches_any.iloc[0]
-                    matched = True
-                    basis = f'UTR Number (Cross-Month: VL {vrow["period"]} → CL {utr_matches_any.iloc[0]["period"]})'
+                basis = 'UTR + Same Period'
 
+        # FALLBACK: Same Period + Same Amount (when no UTR available)
         if not matched:
             vamt = round_amount(vrow['debit'] + vrow['credit'])
-            amt_matches = cl_col[
-                (cl_col['period'] == vrow['period']) &
-                (abs(cl_col['debit'] + cl_col['credit'] - vamt) <= tolerance) &
-                (~cl_col['_matched'])
-            ]
-            if not amt_matches.empty:
-                crow = amt_matches.iloc[0]
-                matched = True
-                basis = 'Period + Amount'
+            if vamt > 0 and vrow['period']:
+                amt_matches = cl_col[
+                    (cl_col['period'] == vrow['period']) &
+                    (abs(cl_col['debit'] + cl_col['credit'] - vamt) <= tolerance) &
+                    (~cl_col['_matched'])
+                ]
+                if not amt_matches.empty:
+                    crow = amt_matches.iloc[0]
+                    matched = True
+                    basis = 'Same Period + Same Amount'
+
 
         if matched:
             vl.at[idx, '_matched'] = True
@@ -2849,29 +2843,56 @@ def main():
         st.caption(f"🟢 Green = Matched | 🔴 Red = Unmatched | 🟡 Yellow = Reversal")
         if not vl_ann_df.empty:
             disp = vl_ann_df.copy()
+            # Format date column safely — preserve original value if parse fails
+            def _safe_date_vl(v):
+                try:
+                    parsed = pd.to_datetime(v, errors='coerce', dayfirst=True)
+                    if pd.notna(parsed):
+                        return parsed.strftime('%d-%b-%Y')
+                except Exception:
+                    pass
+                return str(v) if v not in (None, '', 'nan', 'NaT') else ''
             for col in disp.columns:
                 if 'date' in col.lower():
-                    disp[col] = pd.to_datetime(disp[col], errors='coerce').dt.strftime('%d-%b-%Y').fillna('')
-            st.dataframe(disp, use_container_width=True, hide_index=True)
+                    disp[col] = disp[col].apply(_safe_date_vl)
             if vl_closing_val:
                 st.info(f"**{VL} Closing Balance: {fmt_inr(vl_closing_val)}**")
+            st.dataframe(disp, use_container_width=True, hide_index=True)
 
     with tabs[8]:
         st.markdown(f'<span class="section-tag tag-cl">📗 {CL} — CUSTOMER LEDGER WITH REMARKS</span>', unsafe_allow_html=True)
         st.caption(f"🟢 Green = Matched | 🔴 Red = Unmatched")
         if not cl_ann_df.empty:
             disp = cl_ann_df.copy()
+            # Format date column safely — NEVER overwrite with blank if parse fails, keep original value
+            def _safe_date_fmt(v):
+                try:
+                    parsed = pd.to_datetime(v, errors='coerce', dayfirst=True)
+                    if pd.notna(parsed):
+                        return parsed.strftime('%d-%b-%Y')
+                except Exception:
+                    pass
+                s = str(v) if v not in (None, '', 'nan', 'NaT', float('nan')) else ''
+                return s
             for col in disp.columns:
                 if 'date' in col.lower():
-                    disp[col] = pd.to_datetime(disp[col], errors='coerce').dt.strftime('%d-%b-%Y').fillna('')
-            # Rename for display clarity — always show Voucher No, Voucher Ref No, Date clearly
-            rename_display = {'doc_no': 'Voucher No', 'doc_ref_no': 'Voucher Ref No',
-                              'doc_type': 'Doc Type', 'doc_date': 'Date',
-                              '_remark': 'Remark', '_match_ref': 'Matched With'}
+                    disp[col] = disp[col].apply(_safe_date_fmt)
+            # Rename for display clarity — always show Date, Voucher No, Voucher Ref No clearly
+            rename_display = {
+                'doc_no':      'Voucher No',
+                'doc_ref_no':  'Voucher Ref No',
+                'doc_type':    'Doc Type',
+                'doc_date':    'Date',
+                'particulars': 'Particulars / Narration',
+                '_remark':     'Remark',
+                '_match_ref':  'Matched With',
+            }
             disp = disp.rename(columns=rename_display)
-            # Drop internal helper columns
-            drop_cols = [c for c in disp.columns if c in ('doc_no_clean','doc_ref_no_clean','period','_idx','_matched')]
+            # Drop ONLY internal helper columns — never drop Date, Ref No or any data column
+            drop_cols = [c for c in disp.columns if c in ('doc_no_clean','doc_ref_no_clean','period','_idx','_matched','particulars_ref')]
             disp = disp.drop(columns=drop_cols, errors='ignore')
+            if cl_closing_val:
+                st.info(f"**{CL} Closing Balance: {fmt_inr(cl_closing_val)}**")
             st.dataframe(disp, use_container_width=True, hide_index=True)
 
 
