@@ -259,13 +259,30 @@ def clean_doc_number(val):
     return s
 
 def extract_utr(val):
+    """
+    Extract UTR number from a string.
+    Looks for:
+      - Standard NEFT/RTGS UTR: 4 letters + 18 digits (e.g. HDFC0123456789012345678)
+      - Explicit UTR label: UTR: XXXXXXX or UTR XXXXXXX
+      - IMPS reference: 12-digit number
+    Returns empty string if no UTR found (avoids false matches on plain text).
+    """
     if pd.isna(val):
         return ""
     s = str(val).strip().upper()
-    utr_pattern = re.search(r'[A-Z]{4}\d{18}|UTR[\s:]*([A-Z0-9]+)', s)
-    if utr_pattern:
-        return utr_pattern.group(0).replace(' ', '').replace(':', '')
-    return s
+    # Standard UTR: 4 alpha + 18 digits
+    m = re.search(r'[A-Z]{4}\d{18}', s)
+    if m:
+        return m.group(0)
+    # Explicit UTR label
+    m = re.search(r'UTR[\s:]*([A-Z0-9]{8,})', s)
+    if m:
+        return m.group(1)
+    # IMPS 12-digit reference
+    m = re.search(r'\b(\d{12})\b', s)
+    if m:
+        return m.group(1)
+    return ""
 
 def get_period(dt):
     try:
@@ -500,7 +517,7 @@ def _map_columns(df):
     for c in df.columns:
         cl = str(c).lower().strip()
 
-        # Date column
+        # Date column — match any column with 'date' in name
         if 'date' in cl and 'doc_date' not in already_mapped:
             try_map('doc_date', c)
 
@@ -519,11 +536,12 @@ def _map_columns(df):
         elif 'doc_no' not in already_mapped and 'date' not in cl and 'type' not in cl \
                 and c not in ref_candidates \
                 and any(k in cl for k in ['no.','no ','num','voucher','vch','detail',
-                                           'invoice no','bill no']):
+                                           'invoice no','bill no','transaction id','txn id','chq','cheque']):
             try_map('doc_no', c)
 
-        # Particulars / Narration / Description
-        elif any(k in cl for k in ['particular','narration','description','remarks','remark']) \
+        # Particulars / Narration / Description — always capture for both VL and CL
+        elif any(k in cl for k in ['particular','narration','description','remarks','remark','memo',
+                                    'note','narr','details']) \
                 and 'particulars' not in already_mapped:
             try_map('particulars', c)
 
@@ -585,10 +603,9 @@ def _load_any_ledger(file, is_vendor=True):
     col_map = _map_columns(data)
     df = data.rename(columns=col_map)
 
-    # Ensure all needed columns exist
-    needed = ['doc_date','doc_no','doc_type','debit','credit','closing']
-    if is_vendor:
-        needed += ['particulars']
+    # Ensure all needed columns exist — always load particulars for BOTH VL and CL
+    # CL exports often carry UTR/narration in particulars; without it collections can't match
+    needed = ['doc_date','doc_no','doc_type','particulars','debit','credit','closing']
     for col in needed:
         if col not in df.columns:
             df[col] = ''
@@ -632,17 +649,25 @@ def _load_any_ledger(file, is_vendor=True):
         df['doc_ref_no'] = ''
         df['doc_ref_no_clean'] = ''
 
-    if is_vendor:
-        try:
-            df['particulars'] = df['particulars'].fillna('').astype(str)
-        except Exception:
-            df['particulars'] = ''
-        df['particulars_ref'] = df['particulars'].apply(extract_ref_from_particulars)
+    # Always load particulars for both VL and CL — needed for UTR extraction in collections
+    try:
+        df['particulars'] = df['particulars'].fillna('').astype(str)
+    except Exception:
+        df['particulars'] = ''
+    df['particulars_ref'] = df['particulars'].apply(extract_ref_from_particulars)
 
-    # Filter to rows that have at least one of: doc_no or doc_ref_no
-    has_doc = df['doc_no_clean'].astype(str) != ''
-    has_ref = df['doc_ref_no_clean'].astype(str) != ''
-    df = df[has_doc | has_ref].reset_index(drop=True)
+    if is_vendor:
+        pass  # VL already handled above
+
+    # Keep rows that have:
+    #   - a doc_no, OR
+    #   - a doc_ref_no, OR
+    #   - a valid date with a non-zero debit or credit (catches payment rows where UTR is in particulars)
+    has_doc  = df['doc_no_clean'].astype(str).str.strip() != ''
+    has_ref  = df['doc_ref_no_clean'].astype(str).str.strip() != ''
+    has_date = df['doc_date'].notna()
+    has_amt  = (df['debit'].fillna(0) != 0) | (df['credit'].fillna(0) != 0)
+    df = df[has_doc | has_ref | (has_date & has_amt)].reset_index(drop=True)
     df['_idx']       = df.index
     df['_remark']    = ''
     df['_match_ref'] = ''
@@ -1236,8 +1261,10 @@ def run_reconciliation(vl_orig, cl_orig, tolerance=1.0):
     vl_col = vl[(~vl['_matched']) & (vl['doc_type'].apply(lambda x: is_collection(x, '')))].copy()
     cl_col = cl[(~cl['_matched']) & (cl['doc_type'].apply(lambda x: is_collection(x, '')))].copy()
 
-    vl_col['utr'] = vl_col.apply(lambda r: extract_utr(str(r.get('particulars', '')) + ' ' + str(r.get('doc_no', ''))), axis=1)
-    cl_col['utr'] = cl_col.apply(lambda r: extract_utr(str(r.get('doc_no', '')) + ' ' + str(r.get('doc_type', ''))), axis=1)
+    vl_col['utr'] = vl_col.apply(
+        lambda r: extract_utr(str(r.get('particulars', '')) + ' ' + str(r.get('doc_no', '')) + ' ' + str(r.get('doc_ref_no', ''))), axis=1)
+    cl_col['utr'] = cl_col.apply(
+        lambda r: extract_utr(str(r.get('particulars', '')) + ' ' + str(r.get('doc_no', '')) + ' ' + str(r.get('doc_ref_no', ''))), axis=1)
 
     for idx, vrow in vl_col.iterrows():
         matched = False
@@ -1290,11 +1317,14 @@ def run_reconciliation(vl_orig, cl_orig, tolerance=1.0):
                 'VL Doc No': vrow.get('doc_no', ''),
                 'VL Date': vrow.get('doc_date', ''),
                 'VL Type': vrow.get('doc_type', ''),
+                'VL Particulars': vrow.get('particulars', ''),
                 'VL Amount': vrow.get('debit', 0) + vrow.get('credit', 0),
                 'VL UTR': vrow.get('utr', ''),
-                'CL Doc No': crow.get('doc_no', ''),
+                'CL Voucher No': crow.get('doc_no', ''),
+                'CL Voucher Ref No': crow.get('doc_ref_no', ''),
                 'CL Date': crow.get('doc_date', ''),
                 'CL Type': crow.get('doc_type', ''),
+                'CL Particulars': crow.get('particulars', ''),
                 'CL Amount': crow.get('debit', 0) + crow.get('credit', 0),
                 'CL UTR': crow.get('utr', ''),
                 'Match Basis': basis,
@@ -1356,7 +1386,7 @@ def run_reconciliation(vl_orig, cl_orig, tolerance=1.0):
         else:
             cl_unmatched_remark = 'Unmatched — Tax Invoice'
         cl.at[idx, '_remark'] = cl_unmatched_remark
-        # Always include Date and Ref No clearly in every CL entry
+        # Always include Date, Ref No, and Particulars clearly in every CL entry
         raw_date = r.get('doc_date', '')
         try:
             dt_parsed = pd.to_datetime(raw_date, errors='coerce')
@@ -1365,11 +1395,14 @@ def run_reconciliation(vl_orig, cl_orig, tolerance=1.0):
             fmt_date = str(raw_date)
         ref_no_val = str(r.get('doc_ref_no', '') or '')
         ref_no_val = '' if ref_no_val in ('nan', 'None', 'NaN') else ref_no_val
+        particulars_val = str(r.get('particulars', '') or '')
+        particulars_val = '' if particulars_val in ('nan', 'None', 'NaN') else particulars_val
         entry = {
             'Voucher No': r.get('doc_no', ''),
-            'Voucher Ref No': ref_no_val,          # always present, clearly labeled
-            'Date': fmt_date,                       # always present, formatted DD-Mon-YYYY
+            'Voucher Ref No': ref_no_val,           # always shown
+            'Date': fmt_date,                        # always shown, formatted DD-Mon-YYYY
             'Doc Type': r.get('doc_type', ''),
+            'Particulars': particulars_val,          # always shown — contains UTR for collections
             'Debit': r.get('debit', 0),
             'Credit': r.get('credit', 0),
             'Source': 'Customer Ledger',
@@ -1674,8 +1707,14 @@ def build_excel(results, vl_orig, cl_orig, VL='Vendor', CL='Customer'):
     ws_cl.sheet_view.showGridLines = False
     ws_cl.freeze_panes = 'A4'
 
-    cl_display_cols = ['doc_date', 'doc_no', 'doc_ref_no', 'doc_type', 'debit', 'credit']
-    cl_display_cols = [c for c in cl_display_cols if c in cl_ann.columns]
+    # Always show: Date, Voucher No, Voucher Ref No, Doc Type, Particulars, Debit, Credit
+    # doc_date and doc_ref_no MUST always be included — never skip them
+    cl_display_cols = ['doc_date', 'doc_no', 'doc_ref_no', 'doc_type', 'particulars', 'debit', 'credit']
+    # Ensure every column actually exists in the dataframe (add blank if missing)
+    for col in cl_display_cols:
+        if col not in cl_ann.columns:
+            cl_ann = cl_ann.copy()
+            cl_ann[col] = ''
     cl_display_cols += ['_remark', '_match_ref']
     ncols_cl = len(cl_display_cols)
 
@@ -1698,9 +1737,10 @@ def build_excel(results, vl_orig, cl_orig, VL='Vendor', CL='Customer'):
     ws_cl.cell(row=2, column=1).value = 'SUBTOTAL ▲'
     ws_cl.row_dimensions[2].height = 22
 
-    # Row 3: Headers
-    cl_hmap = {'doc_date':'Doc Date','doc_no':'Voucher No','doc_ref_no':'Voucher Ref No',
-               'doc_type':'Doc Type','debit':'Debit (LC)','credit':'Credit (LC)',
+    # Row 3: Headers — always include Date, Voucher No, Voucher Ref No clearly
+    cl_hmap = {'doc_date':'Date','doc_no':'Voucher No','doc_ref_no':'Voucher Ref No',
+               'doc_type':'Doc Type','particulars':'Particulars / Narration',
+               'debit':'Debit (LC)','credit':'Credit (LC)',
                '_remark':'Remark','_match_ref':'Matched With'}
     headers = [cl_hmap.get(c, c) for c in cl_display_cols]
     style_header(ws_cl, headers, row=3, color='1A6B45')
